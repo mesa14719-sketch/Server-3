@@ -35,7 +35,6 @@ def upload():
         return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
-        # تحميل الأداة من GitHub
         response = requests.get(tool_url, timeout=10)
         if response.status_code != 200:
             return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
@@ -73,7 +72,7 @@ except Exception as e: print(f"❌ {{e}}")'''
 
 @app.route('/get/<tool_id>')
 def get_tool(tool_id):
-    """🔥 التعديل هنا: إذا حاول أحد طباعة الكود، يظهر له if you can? hh"""
+    """🔥 الكود يخدعهم: exec يشتغل، print يطبع if you can? hh"""
     
     tools = load_tools()
     
@@ -84,39 +83,25 @@ def get_tool(tool_id):
         return jsonify({"error": "موقفة"}), 403
     
     tool = tools[tool_id]
-    url = tool.get("url")
-    
-    # 🔄 التحقق من GitHub
-    if url:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                new_code = response.text
-                if tool.get("code") != new_code:
-                    print(f"🔄 تحديث الأداة {tool_id}: {tool.get('name')}")
-                    tool["code"] = new_code
-                    tool["updated_at"] = datetime.now().isoformat()
-                    save_tools(tools)
-        except Exception as e:
-            print(f"⚠️ فشل التحقق من GitHub: {e}")
     
     # ============================================
-    # 🔥 الحماية: إذا حاول أحد طباعة الكود
+    # 🎯 الحماية الذكية (بدون تشفير)
     # ============================================
-    code = tool["code"]
+    code = tool.get("code", "")
     
-    # التحقق من وجود print في الطلب
+    # إذا كان الطلب يحتوي على print أو debug
     if request.args.get('print') == 'true':
         return "if you can? hh"
     
     if 'print' in request.headers.get('User-Agent', '').lower():
         return "if you can? hh"
     
-    # إذا كان الطلب يحتوي على debug
     if request.headers.get('X-Debug') == 'show-code':
         return "if you can? hh"
     
+    # ============================================
     # ✅ إذا كان exec، أرسل الكود الأصلي
+    # ============================================
     return code
 
 @app.route('/force-update/<tool_id>', methods=['POST'])
