@@ -111,7 +111,52 @@ def run_tool(tool_id):
         return jsonify({"error": str(e)}), 500
 
 # ============================================
-# 3. عرض الأدوات المخزنة
+# 3. تحميل ملف التشغيل
+# ============================================
+@app.route('/get_runner/<tool_id>')
+def get_runner(tool_id):
+    """إرسال ملف التشغيل للمستخدم"""
+    
+    tools = load_tools()
+    
+    if tool_id not in tools:
+        return jsonify({"error": "غير موجود"}), 404
+    
+    runner = f'''import requests
+
+SERVER_URL = "https://server-3-mzac.onrender.com"
+TOOL_ID = "{tool_id}"
+
+def run(data=None):
+    try:
+        r = requests.post(
+            f"{{SERVER_URL}}/run/{{TOOL_ID}}",
+            json=data or {{}},
+            timeout=60
+        )
+        if r.status_code == 200:
+            result = r.json()
+            output = result.get("output", "")
+            if output:
+                print(output)
+        else:
+            print(f"❌ فشل: {{r.status_code}}")
+    except Exception as e:
+        print(f"❌ خطأ: {{e}}")
+
+if __name__ == "__main__":
+    run({{}})
+'''
+    
+    return send_file(
+        io.BytesIO(runner.encode()),
+        mimetype='text/x-python',
+        as_attachment=True,
+        download_name='okk.py'
+    )
+
+# ============================================
+# 4. عرض الأدوات المخزنة
 # ============================================
 @app.route('/tools')
 def list_tools():
@@ -122,7 +167,7 @@ def list_tools():
     })
 
 # ============================================
-# 4. حذف أداة
+# 5. حذف أداة
 # ============================================
 @app.route('/delete/<tool_id>', methods=['DELETE'])
 def delete_tool(tool_id):
@@ -135,18 +180,40 @@ def delete_tool(tool_id):
     return jsonify({"status": "✅ تم الحذف"})
 
 # ============================================
-# 5. الصفحة الرئيسية
+# 6. الصفحة الرئيسية
 # ============================================
 @app.route('/')
 def home():
     tools = load_tools()
     return f'''
-    <h1>🚀 مدير الأدوات</h1>
-    <p>عدد الأدوات المخزنة: {len(tools)}</p>
-    <ul>
-        {''.join(f'<li>{tid} - {info["name"]}</li>' for tid, info in tools.items())}
-    </ul>
+    <html>
+    <head><title>🚀 مدير الأدوات</title></head>
+    <body style="background:#0d1117;color:#c9d1d9;font-family:Arial;padding:20px;">
+        <h1 style="color:#58a6ff;">🚀 مدير الأدوات</h1>
+        <p>عدد الأدوات المخزنة: {len(tools)}</p>
+        <ul>
+            {''.join(f'<li>{tid} - {info["name"]}</li>' for tid, info in tools.items())}
+        </ul>
+        <hr>
+        <h2>📤 رفع أداة:</h2>
+        <pre>
+POST /upload
+{{
+    "url": "https://raw.githubusercontent.com/.../tool.py",
+    "name": "اسم الأداة"
+}}
+        </pre>
+        <h2>▶️ تشغيل أداة:</h2>
+        <pre>
+POST /run/TOOL_ID
+{{
+    "key": "value"
+}}
+        </pre>
+    </body>
+    </html>
     '''
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    print("🚀 السيرفر شغال على http://0.0.0.0:5000")
+    app.run(host='0.0.0.0', port=5000, debug=True)
