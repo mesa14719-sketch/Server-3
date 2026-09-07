@@ -1,18 +1,11 @@
-# ═══════════════════════════════════════
-# 📁 server.py - السيرفر (يرفع على Render)
-# ═══════════════════════════════════════
-
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import json
 import os
 import uuid
 from datetime import datetime
+import io
 
 app = Flask(__name__)
-
-# ═══════════════════════════════════════
-# 📂 ملف تخزين الأدوات
-# ═══════════════════════════════════════
 TOOLS_FILE = "tools.json"
 
 def load_tools():
@@ -26,18 +19,13 @@ def save_tools(tools):
     with open(TOOLS_FILE, 'w') as f:
         json.dump(tools, f, indent=2)
 
-# ═══════════════════════════════════════
-# 📌 المسارات
-# ═══════════════════════════════════════
-
 @app.route('/')
 def home():
     tools = load_tools()
-    return f'✅ السيرفر شغال | الأدوات المسجلة: {len(tools)}'
+    return f'✅ السيرفر شغال | الأدوات: {len(tools)}'
 
 @app.route('/register', methods=['POST'])
 def register():
-    """تسجيل أداة جديدة"""
     data = request.json
     tool_name = data.get('name')
     github_token = data.get('token')
@@ -58,79 +46,62 @@ def register():
     }
     save_tools(tools)
     
-    # 🔥 إنشاء ملف الأداة الجديد (المحقون)
+    # ✅ إنشاء محتوى الملف
     runner_code = f'''# ═══════════════════════════════════════
-# 📁 tool_{tool_id}.py - أداة {tool_name}
+# 📁 tool_{tool_id}.py - {tool_name}
 # ═══════════════════════════════════════
 
 import requests
 import sys
 
-# 🔗 رابط السيرفر
-SERVER_URL = "https://your-server.onrender.com"
+SERVER_URL = "https://server-3-jykw.onrender.com"
 TOOL_ID = "{tool_id}"
 
 print("📥 جاري جلب الأداة...")
 
 try:
-    response = requests.get(f"{{SERVER_URL}}/run/{{TOOL_ID}}", timeout=10)
+    r = requests.get(f"{{SERVER_URL}}/run/{{TOOL_ID}}", timeout=10)
     
-    if response.status_code == 200:
-        data = response.json()
-        GITHUB_TOKEN = data["token"]
-        REPO_URL = data["url"]
+    if r.status_code == 200:
+        d = r.json()
+        h = {{'Authorization': f'token {{d["token"]}}', 'Accept': 'application/vnd.github.v3.raw'}}
         
-        print(f"✅ الأداة: {{data['name']}}")
-        
-        headers = {{
-            'Authorization': f'token {{GITHUB_TOKEN}}',
-            'Accept': 'application/vnd.github.v3.raw'
-        }}
-        
+        print(f"✅ الأداة: {{d['name']}}")
         print("📥 جاري تحميل الأداة...")
-        response = requests.get(REPO_URL, headers=headers, timeout=10)
         
-        if response.status_code == 200:
+        r2 = requests.get(d["url"], headers=h, timeout=10)
+        
+        if r2.status_code == 200:
             print("✅ جاري التشغيل...")
-            exec(response.text)
+            exec(r2.text)
         else:
-            print(f"❌ فشل التحميل: {{response.status_code}}")
+            print(f"❌ فشل التحميل: {{r2.status_code}}")
             
-    elif response.status_code == 403:
+    elif r.status_code == 403:
         print("❌ الأداة موقفة")
     else:
-        print(f"❌ فشل: {{response.status_code}}")
+        print(f"❌ فشل: {{r.status_code}}")
         
 except Exception as e:
     print(f"❌ خطأ: {{e}}")
 '''
 
-    # حفظ الملف الجديد
-    tool_filename = f"tool_{tool_id}.py"
-    with open(tool_filename, 'w') as f:
-        f.write(runner_code)
-    
-    return jsonify({
-        "status": "✅ تم التسجيل",
-        "tool_id": tool_id,
-        "name": tool_name,
-        "file": tool_filename,
-        "message": f"تم إنشاء {tool_filename}"
-    })
+    # ✅ إرجاع الملف للتحميل
+    return send_file(
+        io.BytesIO(runner_code.encode()),
+        mimetype='text/x-python',
+        as_attachment=True,
+        download_name=f'tool_{tool_id}.py'
+    )
 
 @app.route('/run/<tool_id>')
 def run_tool(tool_id):
-    """جلب بيانات الأداة"""
     tools = load_tools()
-    
     if tool_id not in tools:
-        return jsonify({"error": "❌ غير موجودة"}), 404
-    
+        return jsonify({"error": "❌ غير موجود"}), 404
     tool = tools[tool_id]
-    
     if not tool.get("active", True):
         return jsonify({"error": "❌ موقفة"}), 403
-    
     return jsonify({
         "token": tool["token"],
         "url": tool["url"],
