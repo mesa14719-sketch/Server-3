@@ -4,12 +4,14 @@ import io
 import uuid
 import json
 import os
+import threading
+import time
 from datetime import datetime
 
 app = Flask(__name__)
 TOOLS_FILE = "tools.json"
+UPDATE_INTERVAL = 60  # كل 60 ثانية
 
-# تحميل الأدوات من الملف
 def load_tools():
     try:
         with open(TOOLS_FILE, 'r') as f:
@@ -17,19 +19,50 @@ def load_tools():
     except:
         return {}
 
-# حفظ الأدوات في الملف
 def save_tools(tools):
     with open(TOOLS_FILE, 'w') as f:
         json.dump(tools, f, indent=2)
 
+def check_for_updates():
+    """التحقق من تحديثات الملفات على GitHub"""
+    while True:
+        try:
+            tools = load_tools()
+            updated = False
+            
+            for tool_id, tool in tools.items():
+                url = tool.get("url")
+                if url:
+                    # جلب الملف من GitHub
+                    response = requests.get(url, timeout=10)
+                    if response.status_code == 200:
+                        new_code = response.text
+                        # إذا تغير الكود
+                        if tool.get("code") != new_code:
+                            print(f"🔄 تحديث الأداة {tool_id}: {tool.get('name')}")
+                            tool["code"] = new_code
+                            tool["updated_at"] = datetime.now().isoformat()
+                            updated = True
+            
+            if updated:
+                save_tools(tools)
+                print("✅ تم تحديث الأدوات")
+                
+        except Exception as e:
+            print(f"⚠️ خطأ في التحديث: {e}")
+        
+        time.sleep(UPDATE_INTERVAL)
+
+# تشغيل خيط التحديث في الخلفية
+threading.Thread(target=check_for_updates, daemon=True).start()
+
 @app.route('/')
 def home():
     tools = load_tools()
-    return f'✅ السيرفر شغال | عدد الأدوات: {len(tools)}'
+    return f'✅ السيرفر شغال | الأدوات: {len(tools)} | تحديث تلقائي كل {UPDATE_INTERVAL} ثانية'
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    """رفع أداة جديدة"""
     data = request.json
     tool_url = data.get('url')
     tool_name = data.get('name', 'أداة')
@@ -38,24 +71,22 @@ def upload():
         return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
-        # تحميل الأداة من الرابط
         response = requests.get(tool_url, timeout=10)
-        
         if response.status_code != 200:
             return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
         
-        # حفظ الأداة
         tool_id = str(uuid.uuid4())[:8]
         tools = load_tools()
         tools[tool_id] = {
             "name": tool_name,
+            "url": tool_url,
             "code": response.text,
             "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
             "active": True
         }
         save_tools(tools)
         
-        # إنشاء ملف التشغيل
         loader = f'''import requests, sys
 SERVER_URL = "https://server-3-mzac.onrender.com"
 TOOL_ID = "{tool_id}"
@@ -72,36 +103,98 @@ except Exception as e: print(f"❌ {{e}}")'''
             as_attachment=True,
             download_name=f'tool_{tool_id}.py'
         )
-        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/get/<tool_id>')
 def get_tool(tool_id):
-    """جلب كود الأداة"""
     tools = load_tools()
-    
     if tool_id not in tools:
-        return jsonify({"error": "الأداة غير موجودة"}), 404
-    
+        return jsonify({"error": "غير موجود"}), 404
     if not tools[tool_id].get("active", True):
-        return jsonify({"error": "الأداة موقفة"}), 403
+        return jsonify({"error": "موقفة"}), 403
+    
+    # 🔄 التحقق الفوري من GitHub
+    url = tools[tool_id].get("url")
+    if url:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                new_code = response.text
+                if tools[tool_id].get("code") != new_code:
+                    tools[tool_id]["code"] = new_code
+                    tools[tool_id]["updated_at"] = datetime.now().isoformat()
+                    save_tools(tools)
+                    print(f"🔄 تحديث فوري للأداة {tool_id}")
+        except:
+            pass
     
     return tools[tool_id]["code"]
 
+@app.route('/force-update/<tool_id>', methods=['POST'])
+def force_update(tool_id):
+    """تحديث قسري لأداة معينة"""
+    tools = load_tools()
+    if tool_id not in tools:
+        return jsonify({"error": "غير موجود"}), 404
+    
+    url = tools[tool_id].get("url")
+    if not url:
+        return jsonify({"error": "لا يوجد رابط"}), 400
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            tools[tool_id]["code"] = response.text
+            tools[tool_id]["updated_at"] = datetime.now().isoformat()
+            save_tools(tools)
+            return jsonify({
+                "status": "✅ تم التحديث",
+                "tool_id": tool_id,
+                "updated_at": tools[tool_id]["updated_at"]
+            })
+        else:
+            return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-all', methods=['POST'])
+def update_all():
+    """تحديث جميع الأدوات"""
+    tools = load_tools()
+    updated = 0
+    for tool_id, tool in tools.items():
+        url = tool.get("url")
+        if url:
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    tool["code"] = response.text
+                    tool["updated_at"] = datetime.now().isoformat()
+                    updated += 1
+            except:
+                pass
+    save_tools(tools)
+    return jsonify({
+        "status": f"✅ تم تحديث {updated} أداة",
+        "updated": updated
+    })
+
 @app.route('/list')
 def list_tools():
-    """عرض جميع الأدوات"""
     tools = load_tools()
     return jsonify({
         "count": len(tools),
-        "tools": [{"id": tid, "name": info["name"], "active": info.get("active", True)} 
-                  for tid, info in tools.items()]
+        "tools": [{
+            "id": tid,
+            "name": info["name"],
+            "active": info.get("active", True),
+            "updated_at": info.get("updated_at", "غير معروف")
+        } for tid, info in tools.items()]
     })
 
 @app.route('/clean', methods=['POST'])
 def clean():
-    """حذف جميع الأدوات"""
     count = len(load_tools())
     save_tools({})
     return jsonify({"status": "✅ تم التنظيف", "deleted": count})
