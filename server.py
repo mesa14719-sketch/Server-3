@@ -57,7 +57,7 @@ def upload():
         
         # إنشاء ملف التشغيل
         loader = f'''import requests, sys
-SERVER_URL = "https://YOUR_SERVER_URL.onrender.com"
+SERVER_URL = "https://server-3-mzac.onrender.com"
 TOOL_ID = "{tool_id}"
 try:
     r = requests.get(f"{{SERVER_URL}}/get/{{TOOL_ID}}", timeout=10)
