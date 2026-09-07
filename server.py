@@ -1,3 +1,4 @@
+
 from flask import Flask, request, send_file, jsonify
 import requests
 import io
@@ -35,6 +36,7 @@ def upload():
         return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
+        # تحميل الأداة من GitHub
         response = requests.get(tool_url, timeout=10)
         if response.status_code != 200:
             return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
@@ -43,8 +45,8 @@ def upload():
         tools = load_tools()
         tools[tool_id] = {
             "name": tool_name,
-            "url": tool_url,
-            "code": response.text,
+            "url": tool_url,          # ← حفظ الرابط
+            "code": response.text,    # ← حفظ الكود
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "active": True
@@ -72,7 +74,7 @@ except Exception as e: print(f"❌ {{e}}")'''
 
 @app.route('/get/<tool_id>')
 def get_tool(tool_id):
-    """🔥 الكود يخدعهم: exec يشتغل، print يطبع if you can? hh"""
+    """✅ هنا المفتاح: يتحقق من GitHub قبل الإرسال"""
     
     tools = load_tools()
     
@@ -91,6 +93,7 @@ def get_tool(tool_id):
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 new_code = response.text
+                # إذا تغير الكود
                 if tool.get("code") != new_code:
                     print(f"🔄 تحديث الأداة {tool_id}: {tool.get('name')}")
                     tool["code"] = new_code
@@ -99,26 +102,12 @@ def get_tool(tool_id):
         except Exception as e:
             print(f"⚠️ فشل التحقق من GitHub: {e}")
     
-    # ============================================
-    # 🎯 الحماية الذكية (بدون تشفير)
-    # ============================================
-    code = tool.get("code", "")
-    
-    # التحقق من وجود print في الطلب
-    if request.args.get('print') == 'true':
-        return "if you can? hh"
-    
-    if 'print' in request.headers.get('User-Agent', '').lower():
-        return "if you can? hh"
-    
-    if request.headers.get('X-Debug') == 'show-code':
-        return "if you can? hh"
-    
-    # ✅ إذا كان exec، أرسل الكود الأصلي
-    return code
+    # إرسال الكود (القديم أو الجديد)
+    return tool["code"]
 
 @app.route('/force-update/<tool_id>', methods=['POST'])
 def force_update(tool_id):
+    """تحديث قسري من GitHub"""
     tools = load_tools()
     if tool_id not in tools:
         return jsonify({"error": "غير موجود"}), 404
