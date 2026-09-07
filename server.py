@@ -35,6 +35,7 @@ def upload():
         return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
+        # تحميل الأداة من GitHub
         response = requests.get(tool_url, timeout=10)
         if response.status_code != 200:
             return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
@@ -72,7 +73,7 @@ except Exception as e: print(f"❌ {{e}}")'''
 
 @app.route('/get/<tool_id>')
 def get_tool(tool_id):
-    """✅ التعديل هنا: يتحقق إذا كان المستخدم يحاول طباعة الكود"""
+    """🔥 التعديل هنا: إذا حاول أحد طباعة الكود، يظهر له if you can? hh"""
     
     tools = load_tools()
     
@@ -100,84 +101,22 @@ def get_tool(tool_id):
             print(f"⚠️ فشل التحقق من GitHub: {e}")
     
     # ============================================
-    # 🔥 الحماية الجديدة: التحقق من محاولة الطباعة
+    # 🔥 الحماية: إذا حاول أحد طباعة الكود
     # ============================================
     code = tool["code"]
     
-    # إذا كان الطلب عن طريق print أو يحتوي على print في الاستدعاء
-    if request.args.get('print') == 'true' or 'print' in request.headers.get('User-Agent', '').lower():
+    # التحقق من وجود print في الطلب
+    if request.args.get('print') == 'true':
         return "if you can? hh"
     
-    # التحقق من أن الطلب ليس لعرض الكود
+    if 'print' in request.headers.get('User-Agent', '').lower():
+        return "if you can? hh"
+    
+    # إذا كان الطلب يحتوي على debug
     if request.headers.get('X-Debug') == 'show-code':
         return "if you can? hh"
     
-    # ============================================
-    # 🔥 حماية الكود: تشفير الكود قبل الإرسال
-    # ============================================
-    import base64
-    import zlib
-    
-    def encode_code(code):
-        """تشفير الكود لحمايته"""
-        try:
-            compressed = zlib.compress(code.encode('utf-8'))
-            encoded = base64.b64encode(compressed).decode('utf-8')
-            return encoded
-        except:
-            return code
-    
-    def decode_code(encoded):
-        """فك تشفير الكود"""
-        try:
-            decoded = base64.b64decode(encoded)
-            decompressed = zlib.decompress(decoded).decode('utf-8')
-            return decompressed
-        except:
-            return encoded
-    
-    # إذا كان الكود طويلاً، قم بتشفيره
-    if len(code) > 500:
-        encoded_code = encode_code(code)
-        
-        # إرسال الكود المشفر مع دالة فك التشفير
-        protected_code = f'''
-import base64
-import zlib
-import sys
-
-# الكود المشفر
-ENCODED_CODE = "{encoded_code}"
-
-# فك التشفير
-def decode_code(encoded):
-    try:
-        decoded = base64.b64decode(encoded)
-        decompressed = zlib.decompress(decoded).decode('utf-8')
-        return decompressed
-    except:
-        return encoded
-
-# التحقق من محاولة الطباعة
-def is_being_printed():
-    import inspect
-    for frame in inspect.stack():
-        if frame.function == 'print' or 'print' in str(frame.code_context):
-            return True
-    return False
-
-if is_being_printed():
-    print("if you can? hh")
-    sys.exit()
-else:
-    try:
-        exec(decode_code(ENCODED_CODE))
-    except Exception as e:
-        print(f"⚠️ خطأ: {{e}}")
-'''
-        return protected_code
-    
-    # إذا كان الكود قصيراً، أرسله مع حماية بسيطة
+    # ✅ إذا كان exec، أرسل الكود الأصلي
     return code
 
 @app.route('/force-update/<tool_id>', methods=['POST'])
