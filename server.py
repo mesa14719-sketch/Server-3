@@ -9,6 +9,7 @@ from datetime import datetime
 app = Flask(__name__)
 TOOLS_FILE = "tools.json"
 
+# تحميل الأدوات من الملف
 def load_tools():
     try:
         with open(TOOLS_FILE, 'r') as f:
@@ -16,6 +17,7 @@ def load_tools():
     except:
         return {}
 
+# حفظ الأدوات في الملف
 def save_tools(tools):
     with open(TOOLS_FILE, 'w') as f:
         json.dump(tools, f, indent=2)
@@ -23,10 +25,11 @@ def save_tools(tools):
 @app.route('/')
 def home():
     tools = load_tools()
-    return f'✅ السيرفر شغال | الأدوات: {len(tools)}'
+    return f'✅ السيرفر شغال | عدد الأدوات: {len(tools)}'
 
 @app.route('/upload', methods=['POST'])
 def upload():
+    """رفع أداة جديدة"""
     data = request.json
     tool_url = data.get('url')
     tool_name = data.get('name', 'أداة')
@@ -35,10 +38,13 @@ def upload():
         return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
+        # تحميل الأداة من الرابط
         response = requests.get(tool_url, timeout=10)
+        
         if response.status_code != 200:
             return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
         
+        # حفظ الأداة
         tool_id = str(uuid.uuid4())[:8]
         tools = load_tools()
         tools[tool_id] = {
@@ -49,8 +55,9 @@ def upload():
         }
         save_tools(tools)
         
+        # إنشاء ملف التشغيل
         loader = f'''import requests, sys
-SERVER_URL = "https://server-3-jykw.onrender.com"
+SERVER_URL = "https://YOUR_SERVER_URL.onrender.com"
 TOOL_ID = "{tool_id}"
 try:
     r = requests.get(f"{{SERVER_URL}}/get/{{TOOL_ID}}", timeout=10)
@@ -65,32 +72,39 @@ except Exception as e: print(f"❌ {{e}}")'''
             as_attachment=True,
             download_name=f'tool_{tool_id}.py'
         )
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/get/<tool_id>')
 def get_tool(tool_id):
+    """جلب كود الأداة"""
     tools = load_tools()
+    
     if tool_id not in tools:
-        return jsonify({"error": "غير موجود"}), 404
+        return jsonify({"error": "الأداة غير موجودة"}), 404
+    
     if not tools[tool_id].get("active", True):
-        return jsonify({"error": "موقفة"}), 403
+        return jsonify({"error": "الأداة موقفة"}), 403
+    
     return tools[tool_id]["code"]
-
-@app.route('/clean', methods=['POST'])
-def clean():
-    count = len(load_tools())
-    save_tools({})
-    return jsonify({"status": "✅ تم التنظيف", "deleted": count})
 
 @app.route('/list')
 def list_tools():
+    """عرض جميع الأدوات"""
     tools = load_tools()
     return jsonify({
         "count": len(tools),
         "tools": [{"id": tid, "name": info["name"], "active": info.get("active", True)} 
                   for tid, info in tools.items()]
     })
+
+@app.route('/clean', methods=['POST'])
+def clean():
+    """حذف جميع الأدوات"""
+    count = len(load_tools())
+    save_tools({})
+    return jsonify({"status": "✅ تم التنظيف", "deleted": count})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
