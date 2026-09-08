@@ -1,3 +1,4 @@
+
 from flask import Flask, request, send_file, jsonify
 import requests
 import io
@@ -30,135 +31,124 @@ def upload():
     data = request.json
     tool_url = data.get('url')
     tool_name = data.get('name', 'أداة')
-    github_token = data.get('token', '')
     
     if not tool_url:
-        return jsonify({"error": "❌ الرابط مطلوب"}), 400
-    
-    if not github_token:
-        return jsonify({"error": "❌ التوكن مطلوب للمستودع الخاص"}), 400
+        return jsonify({"error": "الرابط مطلوب"}), 400
     
     try:
-        # 🔑 استخدام التوكن للوصول
-        headers = {
-            "Authorization": f"token {github_token}",
-            "Accept": "application/vnd.github.v3.raw"
-        }
-        
-        response = requests.get(tool_url, headers=headers, timeout=10)
-        
-        if response.status_code == 401:
-            return jsonify({"error": "❌ التوكن غير صالح أو منتهي"}), 401
-        
-        if response.status_code == 404:
-            return jsonify({"error": "❌ الملف غير موجود"}), 404
-        
+        # تحميل الأداة من GitHub
+        response = requests.get(tool_url, timeout=10)
         if response.status_code != 200:
-            return jsonify({"error": f"❌ فشل التحميل: {response.status_code}"}), 400
+            return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
         
         tool_id = str(uuid.uuid4())[:8]
         tools = load_tools()
         tools[tool_id] = {
             "name": tool_name,
-            "url": tool_url,
-            "code": response.text,
+            "url": tool_url,          # ← حفظ الرابط
+            "code": response.text,    # ← حفظ الكود
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "active": True
         }
         save_tools(tools)
         
-        loader = f'''import requests
-import sys
-
+        loader = f'''import requests, sys
 SERVER_URL = "https://server-3-mzac.onrender.com"
 TOOL_ID = "{tool_id}"
-
-def run(data=None):
-    try:
-        r = requests.post(
-            f"{{SERVER_URL}}/run/{{TOOL_ID}}",
-            json=data or {{}},
-            timeout=60
-        )
-        if r.status_code == 200:
-            result = r.json()
-            output = result.get("output", "")
-            if output:
-                print(output)
-        else:
-            print(f"❌ فشل: {{r.status_code}}")
-    except Exception as e:
-        print(f"❌ خطأ: {{e}}")
-
-if __name__ == "__main__":
-    run({{}})
-'''
+try:
+    r = requests.get(f"{{SERVER_URL}}/get/{{TOOL_ID}}", timeout=10)
+    if r.status_code == 200:
+        exec(r.text)
+    else: print(f"❌ فشل: {{r.status_code}}")
+except Exception as e: print(f"❌ {{e}}")'''
         
         return send_file(
             io.BytesIO(loader.encode()),
             mimetype='text/x-python',
             as_attachment=True,
-            download_name=f'{tool_name}.py'
+            download_name=f'tool_{tool_id}.py'
         )
-        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/run/<tool_id>', methods=['POST'])
-def run_tool(tool_id):
+@app.route('/get/<tool_id>')
+def get_tool(tool_id):
+    """✅ هنا المفتاح: يتحقق من GitHub قبل الإرسال"""
+    
     tools = load_tools()
     
     if tool_id not in tools:
-        return jsonify({"error": "❌ الأداة غير موجودة"}), 404
+        return jsonify({"error": "غير موجود"}), 404
+    
+    if not tools[tool_id].get("active", True):
+        return jsonify({"error": "موقفة"}), 403
     
     tool = tools[tool_id]
+    url = tool.get("url")
     
-    if not tool.get('active', True):
-        return jsonify({"error": "❌ الأداة موقفة"}), 403
+    # 🔄 التحقق من GitHub
+    if url:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                new_code = response.text
+                # إذا تغير الكود
+                if tool.get("code") != new_code:
+                    print(f"🔄 تحديث الأداة {tool_id}: {tool.get('name')}")
+                    tool["code"] = new_code
+                    tool["updated_at"] = datetime.now().isoformat()
+                    save_tools(tools)
+        except Exception as e:
+            print(f"⚠️ فشل التحقق من GitHub: {e}")
     
-    code = tool.get('code', '')
-    user_data = request.json or {}
+    # إرسال الكود (القديم أو الجديد)
+    return tool["code"]
+
+@app.route('/force-update/<tool_id>', methods=['POST'])
+def force_update(tool_id):
+    """تحديث قسري من GitHub"""
+    tools = load_tools()
+    if tool_id not in tools:
+        return jsonify({"error": "غير موجود"}), 404
+    
+    url = tools[tool_id].get("url")
+    if not url:
+        return jsonify({"error": "لا يوجد رابط"}), 400
     
     try:
-        import subprocess
-        import tempfile
-        import os
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-            f.write(code)
-            temp_file = f.name
-        
-        env = os.environ.copy()
-        env['TOOL_ARGS'] = json.dumps(user_data)
-        
-        result = subprocess.run(
-            ['python', temp_file],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env
-        )
-        
-        os.unlink(temp_file)
-        
-        return jsonify({
-            "status": "success",
-            "output": result.stdout,
-            "error": result.stderr if result.stderr else None
-        })
-        
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "⏰ تم تجاوز وقت التنفيذ"}), 408
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            tools[tool_id]["code"] = response.text
+            tools[tool_id]["updated_at"] = datetime.now().isoformat()
+            save_tools(tools)
+            return jsonify({
+                "status": "✅ تم التحديث",
+                "tool_id": tool_id,
+                "updated_at": tools[tool_id]["updated_at"]
+            })
+        else:
+            return jsonify({"error": f"فشل التحميل: {response.status_code}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/clean', methods=['POST'])
+def clean():
+    count = len(load_tools())
+    save_tools({})
+    return jsonify({"status": "✅ تم التنظيف", "deleted": count})
 
 @app.route('/list')
 def list_tools():
     tools = load_tools()
     return jsonify({
         "count": len(tools),
-        "tools": [{"id": tid, "name": info["name"]} for tid, info in tools.items()]
+        "tools": [{
+            "id": tid,
+            "name": info["name"],
+            "active": info.get("active", True),
+            "updated_at": info.get("updated_at", "غير معروف")
+        } for tid, info in tools.items()]
     })
 
 if __name__ == '__main__':
