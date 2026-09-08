@@ -48,7 +48,7 @@ def upload():
         return jsonify({"error": "❌ التوكن مطلوب للمستودع الخاص"}), 400
     
     try:
-        # 🔑 استخدام التوكن المقدم من المستخدم
+        # 🔑 استخدام التوكن للوصول للمستودع الخاص
         headers = {
             "Authorization": f"token {github_token}",
             "Accept": "application/vnd.github.v3.raw"
@@ -56,8 +56,11 @@ def upload():
         
         response = requests.get(tool_url, headers=headers, timeout=10)
         
+        if response.status_code == 401:
+            return jsonify({"error": "❌ التوكن غير صالح أو منتهي الصلاحية"}), 401
+        
         if response.status_code == 404:
-            return jsonify({"error": "❌ الملف غير موجود أو التوكن غير صالح"}), 404
+            return jsonify({"error": "❌ الملف غير موجود أو المستودع خاص"}), 404
         
         if response.status_code != 200:
             return jsonify({"error": f"❌ فشل التحميل: {response.status_code}"}), 400
@@ -136,7 +139,6 @@ def run_tool(tool_id):
     user_data = request.json or {}
     
     try:
-        # تشغيل الأداة على السيرفر
         import subprocess
         import tempfile
         import os
@@ -170,22 +172,7 @@ def run_tool(tool_id):
         return jsonify({"error": str(e)}), 500
 
 # ============================================
-# 3. جلب الكود (للسيرفر فقط)
-# ============================================
-@app.route('/get/<tool_id>')
-def get_tool(tool_id):
-    tools = load_tools()
-    
-    if tool_id not in tools:
-        return jsonify({"error": "غير موجود"}), 404
-    
-    if not tools[tool_id].get("active", True):
-        return jsonify({"error": "موقفة"}), 403
-    
-    return tools[tool_id]["code"]
-
-# ============================================
-# 4. عرض الأدوات
+# 3. عرض الأدوات
 # ============================================
 @app.route('/list')
 def list_tools():
@@ -201,7 +188,7 @@ def list_tools():
     })
 
 # ============================================
-# 5. حذف أداة
+# 4. حذف أداة
 # ============================================
 @app.route('/delete/<tool_id>', methods=['DELETE'])
 def delete_tool(tool_id):
@@ -212,15 +199,6 @@ def delete_tool(tool_id):
     del tools[tool_id]
     save_tools(tools)
     return jsonify({"status": "✅ تم الحذف"})
-
-# ============================================
-# 6. تنظيف جميع الأدوات
-# ============================================
-@app.route('/clean', methods=['POST'])
-def clean():
-    count = len(load_tools())
-    save_tools({})
-    return jsonify({"status": "✅ تم التنظيف", "deleted": count})
 
 # ============================================
 # تشغيل السيرفر
