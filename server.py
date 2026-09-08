@@ -9,9 +9,6 @@ from datetime import datetime
 app = Flask(__name__)
 TOOLS_FILE = "tools.json"
 
-# ============================================
-# تحميل وحفظ الأدوات
-# ============================================
 def load_tools():
     try:
         with open(TOOLS_FILE, 'r') as f:
@@ -23,17 +20,11 @@ def save_tools(tools):
     with open(TOOLS_FILE, 'w') as f:
         json.dump(tools, f, indent=2)
 
-# ============================================
-# الصفحة الرئيسية
-# ============================================
 @app.route('/')
 def home():
     tools = load_tools()
     return f'✅ السيرفر شغال | الأدوات: {len(tools)}'
 
-# ============================================
-# 1. رفع الأداة (يطلب رابط + توكن)
-# ============================================
 @app.route('/upload', methods=['POST'])
 def upload():
     data = request.json
@@ -48,7 +39,7 @@ def upload():
         return jsonify({"error": "❌ التوكن مطلوب للمستودع الخاص"}), 400
     
     try:
-        # 🔑 استخدام التوكن للوصول للمستودع الخاص
+        # 🔑 استخدام التوكن للوصول
         headers = {
             "Authorization": f"token {github_token}",
             "Accept": "application/vnd.github.v3.raw"
@@ -57,18 +48,15 @@ def upload():
         response = requests.get(tool_url, headers=headers, timeout=10)
         
         if response.status_code == 401:
-            return jsonify({"error": "❌ التوكن غير صالح أو منتهي الصلاحية"}), 401
+            return jsonify({"error": "❌ التوكن غير صالح أو منتهي"}), 401
         
         if response.status_code == 404:
-            return jsonify({"error": "❌ الملف غير موجود أو المستودع خاص"}), 404
+            return jsonify({"error": "❌ الملف غير موجود"}), 404
         
         if response.status_code != 200:
             return jsonify({"error": f"❌ فشل التحميل: {response.status_code}"}), 400
         
-        # توليد معرف فريد
         tool_id = str(uuid.uuid4())[:8]
-        
-        # حفظ الأداة في السيرفر
         tools = load_tools()
         tools[tool_id] = {
             "name": tool_name,
@@ -80,9 +68,6 @@ def upload():
         }
         save_tools(tools)
         
-        # ============================================
-        # إنشاء ملف التشغيل (بدون توكن)
-        # ============================================
         loader = f'''import requests
 import sys
 
@@ -120,9 +105,6 @@ if __name__ == "__main__":
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ============================================
-# 2. تشغيل الأداة (بدون كود)
-# ============================================
 @app.route('/run/<tool_id>', methods=['POST'])
 def run_tool(tool_id):
     tools = load_tools()
@@ -171,38 +153,13 @@ def run_tool(tool_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ============================================
-# 3. عرض الأدوات
-# ============================================
 @app.route('/list')
 def list_tools():
     tools = load_tools()
     return jsonify({
         "count": len(tools),
-        "tools": [{
-            "id": tid,
-            "name": info["name"],
-            "active": info.get("active", True),
-            "created_at": info.get("created_at", "غير معروف")
-        } for tid, info in tools.items()]
+        "tools": [{"id": tid, "name": info["name"]} for tid, info in tools.items()]
     })
 
-# ============================================
-# 4. حذف أداة
-# ============================================
-@app.route('/delete/<tool_id>', methods=['DELETE'])
-def delete_tool(tool_id):
-    tools = load_tools()
-    if tool_id not in tools:
-        return jsonify({"error": "غير موجود"}), 404
-    
-    del tools[tool_id]
-    save_tools(tools)
-    return jsonify({"status": "✅ تم الحذف"})
-
-# ============================================
-# تشغيل السيرفر
-# ============================================
 if __name__ == '__main__':
-    print("🚀 السيرفر شغال على http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
