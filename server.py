@@ -2,7 +2,6 @@
 from flask import Flask, request, jsonify, send_file, render_template_string
 import os
 import base64
-import hashlib
 import hmac
 import subprocess
 import tempfile
@@ -16,10 +15,10 @@ from io import BytesIO
 app = Flask(__name__)
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # ==================== قاعدة البيانات (ملف JSON) ====================
 DB_FILE = "tools_db.json"
+
 
 def load_db():
     """تحميل قاعدة البيانات من الملف"""
@@ -31,6 +30,7 @@ def load_db():
             return {}
     return {}
 
+
 def save_db(db):
     """حفظ قاعدة البيانات في الملف"""
     with open(DB_FILE, 'w', encoding='utf-8') as f:
@@ -41,7 +41,6 @@ def save_db(db):
 
 def generate_license_key(tool_id, length=32):
     """توليد كود ترخيص عشوائي فريد"""
-    # نضيف بادئة معرّفة + جزء عشوائي
     random_part = ''.join(
         secrets.choice(string.ascii_uppercase + string.digits)
         for _ in range(length)
@@ -50,12 +49,9 @@ def generate_license_key(tool_id, length=32):
 
 
 def generate_client_file(tool_id, license_key, server_url, tool_name=None):
-    """
-    توليد ملف العميل تلقائياً
-    هذا الملف لا يحتوي على أي كود من الأداة - فقط الترخيص ورابط الخادم
-    """
+    """توليد ملف العميل تلقائياً (لا يحتوي على أي كود من الأداة)"""
     tool_name = tool_name or tool_id
-    
+
     client_code = f'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -134,7 +130,6 @@ def main():
     print(f"📡 الخادم: {{SERVER_URL}}")
     print("-" * 60)
     
-    # جمع الوسائط من سطر الأوامر
     args = sys.argv[1:] if len(sys.argv) > 1 else []
     
     if not args:
@@ -166,7 +161,6 @@ if __name__ == "__main__":
 
 def get_server_url(request):
     """استخراج رابط الخادم من الطلب"""
-    # نحاول الحصول على الرابط من الطلب
     return request.host_url.rstrip('/')
 
 
@@ -193,25 +187,21 @@ def admin_panel():
 @app.route('/upload_tool', methods=['POST'])
 def upload_tool():
     """
-    رفع أداة جديدة إلى الخادم.
-    يستقبل: password, tool_id, tool_name, code (base64), dependencies
+    رفع أداة جديدة إلى الخادم (بدون كلمة مرور).
+    يستقبل: tool_id, tool_name, code (base64), dependencies, max_executions, expires_at
     يُرجع: license_key + client_code
     """
     try:
         data = request.get_json()
-        
-        # التحقق من كلمة المرور
-        if data.get('password') != ADMIN_PASSWORD:
-            return jsonify({"error": "كلمة المرور غير صحيحة"}), 403
-        
+
         tool_id = data.get('tool_id', '').strip()
         tool_name = data.get('tool_name', tool_id).strip()
         encoded_code = data.get('code')
         dependencies = data.get('dependencies', [])
-        
+
         if not all([tool_id, encoded_code]):
             return jsonify({"error": "الحقول المطلوبة ناقصة"}), 400
-        
+
         # التحقق من أن الكود بايثون صالح
         try:
             code_bytes = base64.b64decode(encoded_code)
@@ -219,18 +209,18 @@ def upload_tool():
             compile(code_text, '<string>', 'exec')
         except Exception as e:
             return jsonify({"error": f"كود بايثون غير صالح: {str(e)}"}), 400
-        
+
         # التحقق من عدم وجود الأداة مسبقاً
         db = load_db()
         if tool_id in db:
             return jsonify({"error": f"الأداة '{tool_id}' موجودة مسبقاً"}), 409
-        
+
         # توليد كود ترخيص عشوائي
         license_key = generate_license_key(tool_id)
-        
+
         # الحصول على رابط الخادم
         server_url = get_server_url(request)
-        
+
         # توليد ملف العميل تلقائياً
         client_code = generate_client_file(
             tool_id=tool_id,
@@ -238,21 +228,21 @@ def upload_tool():
             server_url=server_url,
             tool_name=tool_name
         )
-        
+
         # تخزين الأداة في قاعدة البيانات
         db[tool_id] = {
             "tool_id": tool_id,
             "tool_name": tool_name,
-            "code": encoded_code,  # مخزّن كـ Base64
-            "license_key": license_key,  # مخزّن مباشرة (يمكن تجزئته للأمان)
+            "code": encoded_code,
+            "license_key": license_key,
             "dependencies": dependencies,
             "created_at": datetime.now().isoformat(),
             "executions": 0,
-            "max_executions": data.get('max_executions', 0),  # 0 = بلا حد
+            "max_executions": data.get('max_executions', 0),
             "expires_at": data.get('expires_at', None)
         }
         save_db(db)
-        
+
         return jsonify({
             "status": "success",
             "message": f"✅ تم رفع الأداة '{tool_name}' بنجاح",
@@ -261,7 +251,7 @@ def upload_tool():
             "client_code": client_code,
             "instructions": "احفظ client_code في ملف .py وأرسله للمستخدم"
         }), 201
-        
+
     except Exception as e:
         return jsonify({"error": f"خطأ في الخادم: {str(e)}"}), 500
 
@@ -277,41 +267,41 @@ def execute_tool():
         tool_id = data.get('tool_id', '').strip()
         license_key = data.get('license_key', '').strip()
         user_args = data.get('args', [])
-        
+
         if not all([tool_id, license_key]):
             return jsonify({"error": "tool_id و license_key مطلوبان"}), 400
-        
+
         # البحث عن الأداة
         db = load_db()
         if tool_id not in db:
             return jsonify({"error": "الأداة غير موجودة"}), 404
-        
+
         tool = db[tool_id]
-        
+
         # التحقق من الترخيص
         if not hmac.compare_digest(tool['license_key'], license_key):
             return jsonify({"error": "كود الترخيص غير صالح"}), 403
-        
+
         # التحقق من تاريخ الانتهاء
         if tool.get('expires_at'):
             if datetime.now() > datetime.fromisoformat(tool['expires_at']):
                 return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-        
+
         # التحقق من حد الاستخدام
         max_exec = tool.get('max_executions', 0)
         if max_exec > 0 and tool['executions'] >= max_exec:
             return jsonify({"error": "انتهت صلاحية الترخيص (تجاوز الحد الأقصى)"}), 403
-        
+
         # زيادة عداد الاستخدام
         db[tool_id]['executions'] += 1
         save_db(db)
-        
+
         # فك تشفير الكود
         try:
             code_bytes = base64.b64decode(tool['code'])
         except Exception:
             return jsonify({"error": "خطأ في قراءة الأداة"}), 500
-        
+
         # كتابة الكود في ملف مؤقت وتنفيذه
         temp_path = None
         try:
@@ -320,7 +310,7 @@ def execute_tool():
             ) as f:
                 f.write(code_bytes)
                 temp_path = f.name
-            
+
             result = subprocess.run(
                 [sys.executable, temp_path] + [str(a) for a in user_args],
                 capture_output=True,
@@ -328,7 +318,7 @@ def execute_tool():
                 timeout=120,
                 env={**os.environ, "PYTHONIOENCODING": "utf-8"}
             )
-            
+
             return jsonify({
                 "status": "success",
                 "stdout": result.stdout,
@@ -336,11 +326,11 @@ def execute_tool():
                 "returncode": result.returncode,
                 "executions": db[tool_id]['executions']
             })
-            
+
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
-        
+
     except subprocess.TimeoutExpired:
         return jsonify({"error": "انتهت مهلة التنفيذ (120 ثانية)"}), 408
     except Exception as e:
@@ -353,7 +343,7 @@ def tool_info(tool_id):
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
-    
+
     tool = db[tool_id]
     return jsonify({
         "tool_id": tool['tool_id'],
@@ -364,31 +354,26 @@ def tool_info(tool_id):
     })
 
 
-@app.route('/download_client/<tool_id>', methods=['POST'])
+@app.route('/download_client/<tool_id>', methods=['GET'])
 def download_client(tool_id):
-    """تحميل ملف العميل لأداة موجودة"""
-    data = request.get_json() or {}
-    if data.get('password') != ADMIN_PASSWORD:
-        return jsonify({"error": "كلمة المرور غير صحيحة"}), 403
-    
+    """تحميل ملف العميل لأداة موجودة (بدون كلمة مرور)"""
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
-    
+
     tool = db[tool_id]
     server_url = get_server_url(request)
-    
+
     client_code = generate_client_file(
         tool_id=tool_id,
         license_key=tool['license_key'],
         server_url=server_url,
         tool_name=tool['tool_name']
     )
-    
-    # إرجاع الملف للتحميل
+
     buffer = BytesIO(client_code.encode('utf-8'))
     buffer.seek(0)
-    
+
     return send_file(
         buffer,
         mimetype='text/x-python',
@@ -397,13 +382,9 @@ def download_client(tool_id):
     )
 
 
-@app.route('/admin/tools', methods=['GET'])
+@app.route('/list_tools', methods=['GET'])
 def list_tools():
-    """قائمة الأدوات (للوحة التحكم)"""
-    password = request.args.get('password', '')
-    if password != ADMIN_PASSWORD:
-        return jsonify({"error": "غير مصرح"}), 403
-    
+    """قائمة الأدوات (بدون كلمة مرور)"""
     db = load_db()
     tools = []
     for tool_id, tool in db.items():
@@ -413,27 +394,23 @@ def list_tools():
             "created_at": tool['created_at'],
             "executions": tool['executions'],
             "max_executions": tool.get('max_executions', 0),
-            "license_key": tool['license_key'][:15] + "...",  # مخفي جزئياً
+            "license_key": tool['license_key'][:15] + "...",
             "dependencies": tool['dependencies']
         })
-    
+
     return jsonify({"tools": tools, "count": len(tools)})
 
 
-@app.route('/admin/delete_tool/<tool_id>', methods=['DELETE'])
+@app.route('/delete_tool/<tool_id>', methods=['DELETE'])
 def delete_tool(tool_id):
-    """حذف أداة"""
-    data = request.get_json() or {}
-    if data.get('password') != ADMIN_PASSWORD:
-        return jsonify({"error": "غير مصرح"}), 403
-    
+    """حذف أداة (بدون كلمة مرور)"""
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
-    
+
     del db[tool_id]
     save_db(db)
-    
+
     return jsonify({"status": "success", "message": f"تم حذف '{tool_id}'"})
 
 
@@ -461,19 +438,15 @@ ADMIN_HTML = """
             margin-bottom: 20px;
             border: 1px solid #334155;
         }
-        input, button {
-            padding: 10px 15px;
-            border-radius: 8px;
-            border: 1px solid #334155;
-            font-size: 14px;
-        }
-        input { background: #0f172a; color: #e2e8f0; width: 100%; }
         button {
+            padding: 10px 20px;
+            border-radius: 8px;
             background: #38bdf8;
             color: #0f172a;
             cursor: pointer;
             font-weight: bold;
             border: none;
+            font-size: 14px;
         }
         button:hover { background: #0ea5e9; }
         table { width: 100%; border-collapse: collapse; }
@@ -487,14 +460,12 @@ ADMIN_HTML = """
 <body>
     <div class="container">
         <h1>🛡️ لوحة تحكم نظام حماية الأدوات</h1>
-        
+
         <div class="card">
-            <h3>🔑 الدخول</h3>
-            <input type="password" id="password" placeholder="كلمة مرور المدير" />
-            <button onclick="loadTools()" style="margin-top:10px;">عرض الأدوات</button>
+            <button onclick="loadTools()">🔄 تحديث قائمة الأدوات</button>
             <div id="status"></div>
         </div>
-        
+
         <div class="card">
             <h3>📋 الأدوات المسجّلة</h3>
             <table id="toolsTable">
@@ -511,20 +482,19 @@ ADMIN_HTML = """
             </table>
         </div>
     </div>
-    
+
     <script>
         async function loadTools() {
-            const password = document.getElementById('password').value;
             const status = document.getElementById('status');
-            
+
             try {
-                const res = await fetch('/admin/tools?password=' + encodeURIComponent(password));
+                const res = await fetch('/list_tools');
                 const data = await res.json();
-                
+
                 if (res.ok) {
                     status.className = 'status success';
                     status.textContent = '✅ تم التحميل: ' + data.count + ' أداة';
-                    
+
                     const tbody = document.getElementById('toolsBody');
                     tbody.innerHTML = '';
                     data.tools.forEach(tool => {
@@ -547,6 +517,9 @@ ADMIN_HTML = """
                 status.textContent = '❌ خطأ: ' + e.message;
             }
         }
+
+        // تحميل تلقائي عند فتح الصفحة
+        window.addEventListener('load', loadTools);
     </script>
 </body>
 </html>
