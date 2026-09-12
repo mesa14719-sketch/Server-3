@@ -1,8 +1,6 @@
-# app.py
+# app.py - بسيط ومباشر
 from flask import Flask, request, jsonify, send_file, render_template_string
 import os
-import base64
-import hmac
 import subprocess
 import tempfile
 import sys
@@ -10,55 +8,162 @@ import secrets
 import string
 import json
 import ast
-import urllib.request
-import urllib.error
+import threading
+import uuid
 from datetime import datetime
 from io import BytesIO
 
 app = Flask(__name__)
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production")
+# ==================== الإعدادات ====================
+MAX_EXECUTION_TIME = 600   # 10 دقائق
+JOB_RETENTION = 3600       # ساعة
+
+# مجلد تخزين الأدوات
+TOOLS_DIR = "tools_storage"
+os.makedirs(TOOLS_DIR, exist_ok=True)
+
+DB_FILE = "tools_db.json"
+DB_LOCK = threading.Lock()
+
 
 # ==================== قاعدة البيانات ====================
-DB_FILE = "tools_db.json"
-
-
 def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    with DB_LOCK:
+        if os.path.exists(DB_FILE):
+            try:
+                with open(DB_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
 
 
 def save_db(db):
-    with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+    with DB_LOCK:
+        try:
+            with open(DB_FILE, 'w', encoding='utf-8') as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"⚠️ فشل الحفظ: {e}")
+
+
+# ==================== نظام المهام ====================
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+PROCESSES = {}
+
+
+def cleanup_old_jobs():
+    now = datetime.now()
+    with JOBS_LOCK:
+        to_delete = []
+        for job_id, job in JOBS.items():
+            finished = job.get("finished_at")
+            if finished:
+                try:
+                    age = (now - datetime.fromisoformat(finished)).total_seconds()
+                    if age > JOB_RETENTION:
+                        to_delete.append(job_id)
+                except Exception:
+                    pass
+        for job_id in to_delete:
+            JOBS.pop(job_id, None)
+            PROCESSES.pop(job_id, None)
+
+
+def run_tool(job_id, tool_path, user_args, stdin_input):
+    """تشغيل الأداة من مسارها على الخادم"""
+    process = None
+
+    try:
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["status"] = "running"
+                JOBS[job_id]["started_at"] = datetime.now().isoformat()
+
+        # ✅ تشغيل الأداة مباشرة من مسارها
+        process = subprocess.Popen(
+            [sys.executable, "-u", tool_path] + [str(a) for a in user_args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+        )
+
+        with JOBS_LOCK:
+            PROCESSES[job_id] = process
+
+        try:
+            stdout, stderr = process.communicate(
+                input=stdin_input,
+                timeout=MAX_EXECUTION_TIME
+            )
+            returncode = process.returncode
+
+            with JOBS_LOCK:
+                if job_id in JOBS:
+                    JOBS[job_id]["status"] = "completed"
+                    JOBS[job_id]["result"] = {
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "returncode": returncode
+                    }
+                    JOBS[job_id]["finished_at"] = datetime.now().isoformat()
+
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except Exception:
+                pass
+
+            with JOBS_LOCK:
+                if job_id in JOBS:
+                    JOBS[job_id]["status"] = "timeout"
+                    JOBS[job_id]["result"] = {
+                        "error": f"تجاوزت الأداة المهلة ({MAX_EXECUTION_TIME} ثانية)"
+                    }
+                    JOBS[job_id]["finished_at"] = datetime.now().isoformat()
+
+    except Exception as e:
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                JOBS[job_id]["status"] = "failed"
+                JOBS[job_id]["result"] = {"error": str(e)}
+                JOBS[job_id]["finished_at"] = datetime.now().isoformat()
+
+    finally:
+        if process and process.poll() is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        with JOBS_LOCK:
+            PROCESSES.pop(job_id, None)
+        cleanup_old_jobs()
 
 
 # ==================== دوال مساعدة ====================
 
-def generate_license_key(tool_id, length=32):
+def generate_license_key(tool_id):
+    """توليد كود ترخيص عشوائي"""
     random_part = ''.join(
         secrets.choice(string.ascii_uppercase + string.digits)
-        for _ in range(length)
+        for _ in range(32)
     )
     return f"{tool_id.upper()[:8]}-{random_part}"
 
 
 def count_inputs_in_code(code_text):
-    """
-    تحليل كود Python وعدّ استدعاءات input() مع استخراج prompts.
-    """
+    """اكتشاف عدد input() في الكود"""
     try:
         tree = ast.parse(code_text)
     except SyntaxError as e:
         raise ValueError(f"خطأ في بناء الجملة: {e}")
 
     inputs_found = []
-
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == 'input':
@@ -68,68 +173,33 @@ def count_inputs_in_code(code_text):
                     if isinstance(arg, ast.Constant):
                         prompt = str(arg.value)
                     elif isinstance(arg, ast.JoinedStr):
-                        # f-string مثل input(f"أدخل {x}: ")
                         prompt = "أدخل قيمة"
                 inputs_found.append(prompt)
-
     return inputs_found
 
 
-def fetch_code_from_url(url):
-    """
-    جلب كود Python من رابط (GitHub Raw أو أي رابط مباشر).
-    """
-    # تحويل روابط GitHub العادية إلى Raw
-    if "github.com" in url and "/blob/" in url:
-        url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 ToolServer/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return response.read().decode('utf-8')
-    except urllib.error.HTTPError as e:
-        raise ValueError(f"فشل تحميل الرابط (HTTP {e.code}): {url}")
-    except urllib.error.URLError as e:
-        raise ValueError(f"فشل الاتصال بالرابط: {e.reason}")
-    except Exception as e:
-        raise ValueError(f"خطأ في تحميل الرابط: {str(e)}")
-
-
 def generate_client_file(tool_id, license_key, server_url, tool_name=None, inputs_prompts=None):
-    """توليد ملف العميل تلقائياً مع دعم الإدخالات."""
+    """توليد ملف العميل - يحتوي فقط على رابط + ترخيص"""
     tool_name = tool_name or tool_id
     inputs_prompts = inputs_prompts or []
     prompts_repr = repr(inputs_prompts) if inputs_prompts else "[]"
 
-    client_code = f'''#!/usr/bin/env python3
+    return f'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-============================================================
   {tool_name} - Client
-  تم إنشاؤه تلقائياً بواسطة نظام الحماية
-  التاريخ: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-============================================================
-
-  ⚠️ هذا الملف لا يحتوي على أي كود من الأداة.
-  الأداة تعمل على الخادم فقط.
-============================================================
+  {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
 
 import requests
 import sys
-import os
+import time
 
-
-# ==================== الإعدادات (لا تعدلها) ====================
 SERVER_URL = "{server_url}"
 TOOL_ID = "{tool_id}"
 LICENSE_KEY = "{license_key}"
 TOOL_NAME = "{tool_name}"
 INPUTS_PROMPTS = {prompts_repr}
-# ==============================================================
 
 
 def print_banner():
@@ -139,68 +209,119 @@ def print_banner():
 
 
 def collect_inputs():
-    """جمع الإدخالات من المستخدم بناءً على ما تحتاجه الأداة."""
     if not INPUTS_PROMPTS:
         return ""
-
     print(f"\\n📝 الأداة تحتاج {{len(INPUTS_PROMPTS)}} مدخل(ات):")
     print("-" * 60)
-
     values = []
     for i, prompt in enumerate(INPUTS_PROMPTS, 1):
         clean_prompt = prompt.strip() or f"مدخل #{{i}}"
-        value = input(f"{{i}}. {{clean_prompt}}: ").strip()
+        try:
+            value = input(f"{{i}}. {{clean_prompt}}: ").strip()
+        except EOFError:
+            value = ""
         values.append(value)
-
-    # خيار إضافة مدخلات إضافية
     while True:
-        more = input("\\n➕ مدخل إضافي؟ (Enter للتخطي): ").strip()
+        try:
+            more = input("\\n➕ مدخل إضافي؟ (Enter للتخطي): ").strip()
+        except EOFError:
+            break
         if not more:
             break
         values.append(more)
-
     return "\\n".join(values) + "\\n"
 
 
-def execute_tool(stdin_input="", args=None):
-    """إرسال طلب التنفيذ للخادم."""
+def start_execution(stdin_input=""):
     try:
         response = requests.post(
             f"{{SERVER_URL}}/execute",
             json={{
                 "tool_id": TOOL_ID,
                 "license_key": LICENSE_KEY,
-                "args": args or [],
+                "args": [],
                 "stdin_input": stdin_input
             }},
-            timeout=120
+            timeout=30
         )
-
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("stdout"):
-                print(data["stdout"])
-            if data.get("stderr"):
-                print("⚠️ تحذيرات:")
-                print(data["stderr"])
-            return True
+        if response.status_code == 202:
+            return response.json().get("job_id")
         else:
             try:
                 error = response.json().get("error", "خطأ غير معروف")
             except Exception:
                 error = response.text
             print(f"❌ خطأ ({{response.status_code}}): {{error}}")
-            return False
-
-    except requests.exceptions.Timeout:
-        print("❌ انتهت المهلة - الخادم بطيء")
-        return False
-    except requests.exceptions.ConnectionError:
-        print("❌ فشل الاتصال بالخادم")
-        return False
+            return None
     except Exception as e:
-        print(f"❌ خطأ: {{e}}")
-        return False
+        print(f"❌ فشل الاتصال: {{e}}")
+        return None
+
+
+def wait_for_result(job_id):
+    last_status = None
+    start_time = time.time()
+    last_dot = 0
+
+    while True:
+        try:
+            response = requests.get(
+                f"{{SERVER_URL}}/job_status/{{job_id}}",
+                timeout=15
+            )
+            if response.status_code == 404:
+                print("\\n❌ المهمة غير موجودة")
+                return False
+
+            if response.status_code == 200:
+                data = response.json()
+                status = data.get("status")
+
+                if status != last_status:
+                    if status == "running":
+                        print("\\n🔄 بدأ التنفيذ...")
+                    last_status = status
+
+                if status == "completed":
+                    result = data.get("result", {{}})
+                    print("\\n" + "=" * 60)
+                    if result.get("stdout"):
+                        print(result["stdout"])
+                    if result.get("stderr"):
+                        print("⚠️ تحذيرات:")
+                        print(result["stderr"])
+                    return True
+
+                elif status == "timeout":
+                    result = data.get("result", {{}})
+                    print(f"\\n⏱️ {{result.get('error', 'انتهت المهلة')}}")
+                    return False
+
+                elif status == "failed":
+                    result = data.get("result", {{}})
+                    print(f"\\n❌ {{result.get('error', 'فشل التنفيذ')}}")
+                    return False
+
+                elif status == "cancelled":
+                    print("\\n🚫 تم الإلغاء")
+                    return False
+
+                if status in ("pending", "running"):
+                    elapsed = int(time.time() - start_time)
+                    if elapsed - last_dot >= 2:
+                        sys.stdout.write(f"\\r⏳ جاري التنفيذ... ({{elapsed}}ث)   ")
+                        sys.stdout.flush()
+                        last_dot = elapsed
+
+            time.sleep(1.5)
+
+        except requests.exceptions.Timeout:
+            continue
+        except KeyboardInterrupt:
+            print("\\n\\n👋 تم الإلغاء")
+            sys.exit(0)
+        except Exception:
+            time.sleep(2)
 
 
 def main():
@@ -210,12 +331,17 @@ def main():
 
     stdin_input = collect_inputs()
 
-    print(f"\\n⏳ جاري التنفيذ على الخادم...")
+    print(f"\\n📤 إرسال الطلب للخادم...")
+    job_id = start_execution(stdin_input)
+    if not job_id:
+        print("❌ فشل بدء التنفيذ")
+        sys.exit(1)
+
+    print(f"🆔 المهمة: {{job_id[:8]}}...")
     print("=" * 60)
 
-    success = execute_tool(stdin_input=stdin_input)
-
-    print("=" * 60)
+    success = wait_for_result(job_id)
+    print("\\n" + "=" * 60)
     if success:
         print("✅ تم الانتهاء بنجاح")
     else:
@@ -230,7 +356,6 @@ if __name__ == "__main__":
         print("\\n\\n👋 تم الإلغاء")
         sys.exit(0)
 '''
-    return client_code
 
 
 def get_server_url(request):
@@ -242,10 +367,13 @@ def get_server_url(request):
 @app.route('/')
 def home():
     db = load_db()
+    with JOBS_LOCK:
+        active = sum(1 for j in JOBS.values() if j["status"] in ("pending", "running"))
     return jsonify({
         "status": "🟢 الخادم يعمل",
         "tools_count": len(db),
-        "version": "2.0.0"
+        "active_jobs": active,
+        "version": "5.0.0"
     })
 
 
@@ -257,69 +385,49 @@ def admin_panel():
 @app.route('/upload_tool', methods=['POST'])
 def upload_tool():
     """
-    رفع أداة جديدة.
-    يستقبل:
-      - tool_id, tool_name, dependencies, max_executions, expires_at
-      - إما: code (base64)
-      - أو: code_url (رابط GitHub Raw أو أي رابط مباشر)
+    رفع أداة - يُخزَّن الكود كما هو في ملف منفصل.
     """
     try:
         data = request.get_json()
-
         tool_id = data.get('tool_id', '').strip()
         tool_name = data.get('tool_name', tool_id).strip()
-        encoded_code = data.get('code')
-        code_url = data.get('code_url', '').strip()
+        code_text = data.get('code')  # ← كود Python عادي
         dependencies = data.get('dependencies', [])
 
-        if not tool_id:
-            return jsonify({"error": "tool_id مطلوب"}), 400
+        if not all([tool_id, code_text]):
+            return jsonify({"error": "tool_id و code مطلوبان"}), 400
 
-        # ✅ الحصول على الكود من مصدرين
-        code_text = None
-
-        if code_url:
-            # من رابط
-            try:
-                code_text = fetch_code_from_url(code_url)
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 400
-        elif encoded_code:
-            # من Base64
-            try:
-                code_text = base64.b64decode(encoded_code).decode('utf-8')
-            except Exception as e:
-                return jsonify({"error": f"فشل فك Base64: {str(e)}"}), 400
-        else:
-            return jsonify({"error": "يجب توفير code أو code_url"}), 400
-
-        # التحقق من أن الكود بايثون صالح
+        # التحقق من أن الكود صالح
         try:
             compile(code_text, '<string>', 'exec')
         except SyntaxError as e:
-            return jsonify({"error": f"كود بايثون غير صالح: {str(e)}"}), 400
+            return jsonify({"error": f"كود غير صالح: {str(e)}"}), 400
 
-        # ✅ اكتشاف الإدخالات تلقائياً
+        # اكتشاف الإدخالات
         try:
             detected_inputs = count_inputs_in_code(code_text)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
-        print(f"\n🔍 تحليل الأداة '{tool_id}':")
-        print(f"   📦 عدد الإدخالات المكتشفة: {len(detected_inputs)}")
-        for i, prompt in enumerate(detected_inputs, 1):
-            print(f"      {i}. {prompt or '(بدون نص)'}")
-
-        # إعادة ترميز الكود بـ Base64 للتخزين
-        stored_code = base64.b64encode(code_text.encode('utf-8')).decode('utf-8')
-
         db = load_db()
         if tool_id in db:
             return jsonify({"error": f"الأداة '{tool_id}' موجودة مسبقاً"}), 409
 
+        # ✅ حفظ الكود في ملف على الخادم
+        tool_filename = f"{tool_id}.py"
+        tool_path = os.path.join(TOOLS_DIR, tool_filename)
+
+        with open(tool_path, 'w', encoding='utf-8') as f:
+            f.write(code_text)
+
+        print(f"✅ تم حفظ الأداة في: {tool_path}")
+        print(f"🔍 عدد الإدخالات: {len(detected_inputs)}")
+
+        # توليد ترخيص
         license_key = generate_license_key(tool_id)
         server_url = get_server_url(request)
 
+        # توليد العميل
         client_code = generate_client_file(
             tool_id=tool_id,
             license_key=license_key,
@@ -328,41 +436,39 @@ def upload_tool():
             inputs_prompts=detected_inputs
         )
 
+        # حفظ في قاعدة البيانات
         db[tool_id] = {
             "tool_id": tool_id,
             "tool_name": tool_name,
-            "code": stored_code,
+            "file_path": tool_path,
             "license_key": license_key,
             "dependencies": dependencies,
             "created_at": datetime.now().isoformat(),
             "executions": 0,
             "max_executions": data.get('max_executions', 0),
             "expires_at": data.get('expires_at', None),
-            "inputs_prompts": detected_inputs,
-            "source_url": code_url if code_url else None
+            "inputs_prompts": detected_inputs
         }
         save_db(db)
 
         return jsonify({
             "status": "success",
-            "message": f"✅ تم رفع الأداة '{tool_name}' بنجاح",
+            "message": f"✅ تم رفع الأداة '{tool_name}'",
             "tool_id": tool_id,
             "license_key": license_key,
+            "file_path": tool_path,
             "inputs_count": len(detected_inputs),
             "inputs_prompts": detected_inputs,
             "client_code": client_code
         }), 201
 
     except Exception as e:
-        return jsonify({"error": f"خطأ في الخادم: {str(e)}"}), 500
+        return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
 
 @app.route('/execute', methods=['POST'])
 def execute_tool():
-    """
-    تنفيذ أداة مخزّنة.
-    يستقبل: tool_id, license_key, args, stdin_input
-    """
+    """تنفيذ الأداة من ملفها على الخادم"""
     try:
         data = request.get_json()
         tool_id = data.get('tool_id', '').strip()
@@ -379,59 +485,96 @@ def execute_tool():
 
         tool = db[tool_id]
 
-        if not hmac.compare_digest(tool['license_key'], license_key):
+        # التحقق من الترخيص
+        if tool['license_key'] != license_key:
             return jsonify({"error": "كود الترخيص غير صالح"}), 403
 
+        # التحقق من الانتهاء
         if tool.get('expires_at'):
             if datetime.now() > datetime.fromisoformat(tool['expires_at']):
                 return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
 
+        # التحقق من الحد الأقصى
         max_exec = tool.get('max_executions', 0)
         if max_exec > 0 and tool['executions'] >= max_exec:
-            return jsonify({"error": "انتهت صلاحية الترخيص (تجاوز الحد)"}), 403
+            return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
 
+        # ✅ التحقق من وجود الملف
+        tool_path = tool.get('file_path')
+        if not tool_path or not os.path.exists(tool_path):
+            return jsonify({"error": "ملف الأداة غير موجود على الخادم"}), 404
+
+        # زيادة العداد
         db[tool_id]['executions'] += 1
         save_db(db)
 
-        try:
-            code_bytes = base64.b64decode(tool['code'])
-        except Exception:
-            return jsonify({"error": "خطأ في قراءة الأداة"}), 500
+        # إنشاء مهمة
+        job_id = str(uuid.uuid4())
+        with JOBS_LOCK:
+            JOBS[job_id] = {
+                "job_id": job_id,
+                "tool_id": tool_id,
+                "status": "pending",
+                "created_at": datetime.now().isoformat(),
+                "result": None
+            }
 
-        temp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode='wb', suffix='.py', delete=False
-            ) as f:
-                f.write(code_bytes)
-                temp_path = f.name
+        thread = threading.Thread(
+            target=run_tool,
+            args=(job_id, tool_path, user_args, stdin_input),
+            daemon=True
+        )
+        thread.start()
 
-            # ✅ تمرير stdin_input للأداة (يحل مشكلة input())
-            result = subprocess.run(
-                [sys.executable, temp_path] + [str(a) for a in user_args],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                input=stdin_input,
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"}
-            )
+        return jsonify({
+            "status": "started",
+            "job_id": job_id
+        }), 202
 
-            return jsonify({
-                "status": "success",
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode,
-                "executions": db[tool_id]['executions']
-            })
-
-        finally:
-            if temp_path and os.path.exists(temp_path):
-                os.unlink(temp_path)
-
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "انتهت مهلة التنفيذ (120 ثانية)"}), 408
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
+
+
+@app.route('/job_status/<job_id>', methods=['GET'])
+def job_status(job_id):
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            return jsonify({"error": "المهمة غير موجودة"}), 404
+        job = dict(JOBS[job_id])
+        result = dict(job["result"]) if job.get("result") else None
+
+    response = {
+        "job_id": job_id,
+        "tool_id": job["tool_id"],
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "finished_at": job.get("finished_at")
+    }
+    if result:
+        response["result"] = result
+    return jsonify(response)
+
+
+@app.route('/job_kill/<job_id>', methods=['POST'])
+def job_kill(job_id):
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            return jsonify({"error": "المهمة غير موجودة"}), 404
+        if JOBS[job_id]["status"] not in ("pending", "running"):
+            return jsonify({"error": "المهمة انتهت"}), 400
+
+        process = PROCESSES.get(job_id)
+        if process and process.poll() is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+        JOBS[job_id]["status"] = "cancelled"
+        JOBS[job_id]["finished_at"] = datetime.now().isoformat()
+        JOBS[job_id]["result"] = {"error": "تم الإلغاء"}
+
+    return jsonify({"status": "success"})
 
 
 @app.route('/tool_info/<tool_id>', methods=['GET'])
@@ -446,10 +589,9 @@ def tool_info(tool_id):
         "tool_name": tool['tool_name'],
         "created_at": tool['created_at'],
         "executions": tool['executions'],
-        "dependencies": tool['dependencies'],
+        "file_exists": os.path.exists(tool.get('file_path', '')),
         "inputs_count": len(tool.get('inputs_prompts', [])),
-        "inputs_prompts": tool.get('inputs_prompts', []),
-        "source_url": tool.get('source_url')
+        "inputs_prompts": tool.get('inputs_prompts', [])
     })
 
 
@@ -491,13 +633,17 @@ def list_tools():
             "tool_name": tool['tool_name'],
             "created_at": tool['created_at'],
             "executions": tool['executions'],
-            "max_executions": tool.get('max_executions', 0),
-            "license_key": tool['license_key'][:15] + "...",
-            "dependencies": tool['dependencies'],
-            "inputs_count": len(tool.get('inputs_prompts', []))
+            "inputs_count": len(tool.get('inputs_prompts', [])),
+            "file_exists": os.path.exists(tool.get('file_path', ''))
         })
 
-    return jsonify({"tools": tools, "count": len(tools)})
+    with JOBS_LOCK:
+        jobs_info = {
+            "total": len(JOBS),
+            "active": sum(1 for j in JOBS.values() if j["status"] in ("pending", "running"))
+        }
+
+    return jsonify({"tools": tools, "count": len(tools), "jobs": jobs_info})
 
 
 @app.route('/delete_tool/<tool_id>', methods=['DELETE'])
@@ -506,13 +652,21 @@ def delete_tool(tool_id):
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
 
+    # حذف الملف
+    tool_path = db[tool_id].get('file_path')
+    if tool_path and os.path.exists(tool_path):
+        try:
+            os.unlink(tool_path)
+        except Exception:
+            pass
+
     del db[tool_id]
     save_db(db)
 
-    return jsonify({"status": "success", "message": f"تم حذف '{tool_id}'"})
+    return jsonify({"status": "success"})
 
 
-# ==================== لوحة التحكم HTML ====================
+# ==================== لوحة التحكم ====================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -525,25 +679,38 @@ ADMIN_HTML = """
         .container { max-width: 1200px; margin: 0 auto; }
         h1 { color: #38bdf8; margin-bottom: 20px; }
         .card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
-        button { padding: 10px 20px; border-radius: 8px; background: #38bdf8; color: #0f172a; cursor: pointer; font-weight: bold; border: none; font-size: 14px; }
+        .stats { display: flex; gap: 20px; flex-wrap: wrap; }
+        .stat { background: #0f172a; padding: 15px 25px; border-radius: 8px; }
+        .stat-value { font-size: 28px; color: #38bdf8; font-weight: bold; }
+        .stat-label { font-size: 13px; color: #94a3b8; margin-top: 5px; }
+        button { padding: 10px 20px; border-radius: 8px; background: #38bdf8; color: #0f172a; cursor: pointer; font-weight: bold; border: none; }
         button:hover { background: #0ea5e9; }
         table { width: 100%; border-collapse: collapse; }
         th, td { padding: 12px; text-align: right; border-bottom: 1px solid #334155; }
         th { color: #38bdf8; }
-        .status { padding: 8px 12px; border-radius: 6px; margin-top: 10px; }
-        .success { background: #065f46; color: #6ee7b7; }
-        .error { background: #7f1d1d; color: #fca5a5; }
+        .ok { color: #6ee7b7; }
+        .no { color: #fca5a5; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🛡️ لوحة تحكم نظام حماية الأدوات</h1>
+        <h1>🛡️ لوحة تحكم الأدوات</h1>
         <div class="card">
-            <button onclick="loadTools()">🔄 تحديث قائمة الأدوات</button>
-            <div id="status"></div>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" id="statTools">-</div>
+                    <div class="stat-label">الأدوات</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="statJobs">-</div>
+                    <div class="stat-label">مهام نشطة</div>
+                </div>
+            </div>
         </div>
         <div class="card">
-            <h3>📋 الأدوات المسجّلة</h3>
+            <button onclick="loadTools()">🔄 تحديث</button>
+        </div>
+        <div class="card">
             <table>
                 <thead>
                     <tr>
@@ -551,7 +718,7 @@ ADMIN_HTML = """
                         <th>الاسم</th>
                         <th>الاستخدامات</th>
                         <th>الإدخالات</th>
-                        <th>الترخيص</th>
+                        <th>الملف موجود</th>
                         <th>التاريخ</th>
                     </tr>
                 </thead>
@@ -561,35 +728,24 @@ ADMIN_HTML = """
     </div>
     <script>
         async function loadTools() {
-            const status = document.getElementById('status');
-            try {
-                const res = await fetch('/list_tools');
-                const data = await res.json();
-                if (res.ok) {
-                    status.className = 'status success';
-                    status.textContent = '✅ تم التحميل: ' + data.count + ' أداة';
-                    const tbody = document.getElementById('toolsBody');
-                    tbody.innerHTML = '';
-                    data.tools.forEach(tool => {
-                        const row = document.createElement('tr');
-                        row.innerHTML = `
-                            <td>${tool.tool_id}</td>
-                            <td>${tool.tool_name}</td>
-                            <td>${tool.executions}</td>
-                            <td>${tool.inputs_count}</td>
-                            <td>${tool.license_key}</td>
-                            <td>${tool.created_at.split('T')[0]}</td>
-                        `;
-                        tbody.appendChild(row);
-                    });
-                } else {
-                    status.className = 'status error';
-                    status.textContent = '❌ ' + data.error;
-                }
-            } catch (e) {
-                status.className = 'status error';
-                status.textContent = '❌ خطأ: ' + e.message;
-            }
+            const res = await fetch('/list_tools');
+            const data = await res.json();
+            document.getElementById('statTools').textContent = data.count;
+            document.getElementById('statJobs').textContent = data.jobs.active;
+            const tbody = document.getElementById('toolsBody');
+            tbody.innerHTML = '';
+            data.tools.forEach(t => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${t.tool_id}</td>
+                    <td>${t.tool_name}</td>
+                    <td>${t.executions}</td>
+                    <td>${t.inputs_count}</td>
+                    <td class="${t.file_exists ? 'ok' : 'no'}">${t.file_exists ? '✅' : '❌'}</td>
+                    <td>${t.created_at.split('T')[0]}</td>
+                `;
+                tbody.appendChild(row);
+            });
         }
         window.addEventListener('load', loadTools);
     </script>
@@ -600,4 +756,4 @@ ADMIN_HTML = """
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
