@@ -1,4 +1,4 @@
-# app.py
+# app.py - النسخة النهائية بدون ADMIN_KEY
 from flask import Flask, request, jsonify, send_file
 import os
 import subprocess
@@ -20,10 +20,9 @@ app = Flask(__name__)
 
 # ==================== الإعدادات ====================
 SECRET_KEY = os.environ.get("SECRET_KEY", "change-me")
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "admin-key-change-me")
 MAX_EXECUTION_TIME = int(os.environ.get("MAX_EXECUTION_TIME", 600))
 SYNC_INTERVAL = 60          # فحص التحديثات كل 60 ثانية
-JOB_RETENTION = 3600
+JOB_RETENTION = 3600        # الاحتفاظ بنتائج المهام ساعة
 
 # ==================== قاعدة البيانات ====================
 DB_FILE = "tools_db.json"
@@ -77,6 +76,7 @@ def cleanup_old_jobs():
 def run_tool(job_id, code_text, user_args, stdin_input):
     """تشغيل الأداة في الخلفية"""
     process = None
+    temp_path = None
 
     try:
         with JOBS_LOCK:
@@ -146,7 +146,7 @@ def run_tool(job_id, code_text, user_args, stdin_input):
                 JOBS[job_id]["finished_at"] = datetime.now().isoformat()
 
     finally:
-        if 'temp_path' in locals() and os.path.exists(temp_path):
+        if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)
             except Exception:
@@ -176,32 +176,27 @@ def generate_license_key(tool_id):
 
 def fetch_from_github(url):
     """جلب كود من GitHub"""
-    original_url = url
-    
-    # تحويل روابط GitHub العادية إلى Raw
     if "github.com" in url and "/blob/" in url:
         url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
     elif "gist.github.com" in url:
         if not url.endswith("/raw"):
             url = url.rstrip("/") + "/raw"
-    
+
     try:
-        # نضيف cache-busting لضمان جلب أحدث نسخة
         separator = "&" if "?" in url else "?"
         fresh_url = f"{url}{separator}t={int(time.time())}"
-        
+
         req = urllib.request.Request(
             fresh_url,
             headers={
-                "User-Agent": "Mozilla/5.0 ToolServer/8.0",
+                "User-Agent": "Mozilla/5.0 ToolServer/9.0",
                 "Cache-Control": "no-cache"
             }
         )
         with urllib.request.urlopen(req, timeout=30) as response:
-            content = response.read().decode('utf-8')
-            return content
+            return response.read().decode('utf-8')
     except urllib.error.HTTPError as e:
-        raise ValueError(f"فشل التحميل (HTTP {e.code})")
+        raise ValueError(f"فشل التحميل (HTTP {e.code}). تأكد من أن الرابط عام.")
     except urllib.error.URLError as e:
         raise ValueError(f"فشل الاتصال: {e.reason}")
     except Exception as e:
@@ -209,7 +204,7 @@ def fetch_from_github(url):
 
 
 def compute_hash(code_text):
-    """حساب بصمة الكود لمعرفة التغييرات"""
+    """حساب بصمة الكود"""
     return hashlib.sha256(code_text.encode('utf-8')).hexdigest()
 
 
@@ -252,7 +247,7 @@ def print_banner():
 def verify_license():
     """جلب الترخيص من السرفر"""
     print("\\n🔐 جاري جلب الترخيص من السرفر...")
-    
+
     try:
         response = requests.post(
             f"{{SERVER_URL}}/verify_license",
@@ -262,7 +257,7 @@ def verify_license():
             }},
             timeout=30
         )
-        
+
         if response.status_code == 200:
             data = response.json()
             print(f"✅ تم التحقق من الترخيص")
@@ -277,7 +272,7 @@ def verify_license():
                 error = response.text
             print(f"❌ فشل التحقق: {{error}}")
             return False
-            
+
     except requests.exceptions.Timeout:
         print("❌ انتهت المهلة - السرفر بطيء")
         return False
@@ -301,7 +296,7 @@ def start_execution(args):
             }},
             timeout=30
         )
-        
+
         if response.status_code == 202:
             return response.json().get("job_id")
         else:
@@ -311,7 +306,7 @@ def start_execution(args):
                 error = response.text
             print(f"❌ خطأ ({{response.status_code}}): {{error}}")
             return None
-            
+
     except Exception as e:
         print(f"❌ فشل الاتصال: {{e}}")
         return None
@@ -329,7 +324,7 @@ def wait_for_result(job_id):
                 f"{{SERVER_URL}}/job_status/{{job_id}}",
                 timeout=15
             )
-            
+
             if response.status_code == 404:
                 print("\\n❌ المهمة غير موجودة")
                 return False
@@ -389,34 +384,29 @@ def main():
     print_banner()
     print(f"📡 السرفر: {{SERVER_URL}}")
     print("-" * 60)
-    
-    # 1. التحقق من الترخيص
+
     if not verify_license():
         print("\\n❌ فشل التحقق من الترخيص")
         sys.exit(1)
-    
-    # 2. جمع الوسائط من سطر الأوامر
+
     args = sys.argv[1:] if len(sys.argv) > 1 else []
-    
+
     if args:
         print(f"\\n📥 الوسائط المستلمة: {{args}}")
     else:
         print("\\n📝 لم يتم تمرير أي وسائط")
-        print("   يمكنك تمريرها هكذا: python client.py arg1 arg2")
-    
-    # 3. بدء التنفيذ
+
     print(f"\\n📤 إرسال الطلب للسرفر...")
     job_id = start_execution(args)
     if not job_id:
         print("❌ فشل بدء التنفيذ")
         sys.exit(1)
-    
+
     print(f"🆔 المهمة: {{job_id[:8]}}...")
     print("=" * 60)
-    
-    # 4. الانتظار
+
     success = wait_for_result(job_id)
-    
+
     print("\\n" + "=" * 60)
     if success:
         print("✅ تم الانتهاء بنجاح")
@@ -442,40 +432,38 @@ def get_server_url(request):
 def sync_worker():
     """عامل المزامنة - يفحص GitHub كل 60 ثانية"""
     print("🔄 بدأ عامل المزامنة (كل 60 ثانية)")
-    
+
     while True:
         try:
             time.sleep(SYNC_INTERVAL)
-            
+
             db = load_db()
             updated = 0
-            
+
             for tool_id, tool in list(db.items()):
                 github_url = tool.get('github_url')
                 if not github_url:
                     continue
-                
+
                 try:
-                    # جلب النسخة الحالية من GitHub
                     new_code = fetch_from_github(github_url)
                     new_hash = compute_hash(new_code)
                     old_hash = tool.get('code_hash')
-                    
+
                     if new_hash != old_hash:
-                        # ✅ الكود تغيّر → تحديث
                         db[tool_id]['code'] = new_code
                         db[tool_id]['code_hash'] = new_hash
                         db[tool_id]['updated_at'] = datetime.now().isoformat()
                         updated += 1
                         print(f"🔄 تم تحديث '{tool_id}' (تغيّر الكود)")
-                
+
                 except Exception as e:
                     print(f"⚠️ فشل تحديث '{tool_id}': {e}")
-            
+
             if updated > 0:
                 save_db(db)
                 print(f"✅ تم تحديث {updated} أداة")
-        
+
         except Exception as e:
             print(f"⚠️ خطأ في عامل المزامنة: {e}")
             time.sleep(10)
@@ -495,63 +483,58 @@ def home():
     db = load_db()
     with JOBS_LOCK:
         active = sum(1 for j in JOBS.values() if j["status"] in ("pending", "running"))
-    
+
     return jsonify({
         "status": "🟢 السرفر يعمل",
         "tools_count": len(db),
         "active_jobs": active,
         "sync_interval": SYNC_INTERVAL,
-        "version": "8.0.0"
+        "version": "9.0.0"
     })
 
 
 @app.route('/upload_tool', methods=['POST'])
 def upload_tool():
     """
-    رفع أداة من رابط GitHub.
-    يستقبل: admin_key, tool_id, tool_name, github_url, dependencies
+    رفع أداة من رابط GitHub (بدون مفتاح).
     """
     try:
         data = request.get_json()
-        
-        # التحقق من المفتاح
-        if data.get('admin_key') != ADMIN_KEY:
-            return jsonify({"error": "غير مصرح"}), 403
-        
+
         tool_id = data.get('tool_id', '').strip()
         tool_name = data.get('tool_name', tool_id).strip()
         github_url = data.get('github_url', '').strip()
         dependencies = data.get('dependencies', [])
-        
+
         if not all([tool_id, github_url]):
             return jsonify({"error": "tool_id و github_url مطلوبان"}), 400
-        
+
         # جلب الكود من GitHub
         try:
             code_text = fetch_from_github(github_url)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
-        
+
         # التحقق من الكود
         try:
             compile(code_text, '<string>', 'exec')
         except SyntaxError as e:
             return jsonify({"error": f"كود غير صالح: {str(e)}"}), 400
-        
+
         print(f"\n✅ استلمت الأداة '{tool_id}'")
         print(f"🔗 من: {github_url}")
         print(f"📏 الحجم: {len(code_text)} حرف")
-        
+
         # التحقق من عدم الوجود
         db = load_db()
         if tool_id in db:
             return jsonify({"error": f"الأداة '{tool_id}' موجودة مسبقاً"}), 409
-        
+
         # توليد الترخيص
         license_key = generate_license_key(tool_id)
         server_url = get_server_url(request)
         code_hash = compute_hash(code_text)
-        
+
         # توليد العميل
         client_code = generate_client_file(
             tool_id=tool_id,
@@ -559,8 +542,8 @@ def upload_tool():
             server_url=server_url,
             tool_name=tool_name
         )
-        
-        # ✅ تخزين كل شيء
+
+        # تخزين
         db[tool_id] = {
             "tool_id": tool_id,
             "tool_name": tool_name,
@@ -577,7 +560,7 @@ def upload_tool():
             "sync_enabled": True
         }
         save_db(db)
-        
+
         return jsonify({
             "status": "success",
             "message": f"✅ تم رفع '{tool_name}'",
@@ -589,7 +572,7 @@ def upload_tool():
             "sync_interval": SYNC_INTERVAL,
             "client_code": client_code
         }), 201
-        
+
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
@@ -601,27 +584,27 @@ def verify_license():
         data = request.get_json()
         tool_id = data.get('tool_id', '').strip()
         license_key = data.get('license_key', '').strip()
-        
+
         if not all([tool_id, license_key]):
             return jsonify({"error": "tool_id و license_key مطلوبان"}), 400
-        
+
         db = load_db()
         if tool_id not in db:
             return jsonify({"error": "الأداة غير موجودة"}), 404
-        
+
         tool = db[tool_id]
-        
+
         if tool['license_key'] != license_key:
             return jsonify({"error": "الترخيص غير صالح"}), 403
-        
+
         if tool.get('expires_at'):
             if datetime.now() > datetime.fromisoformat(tool['expires_at']):
                 return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-        
+
         max_exec = tool.get('max_executions', 0)
         if max_exec > 0 and tool['executions'] >= max_exec:
             return jsonify({"error": "انتهت صلاحية الترخيص (تجاوز الحد)"}), 403
-        
+
         return jsonify({
             "status": "valid",
             "tool_id": tool_id,
@@ -631,7 +614,7 @@ def verify_license():
             "updated_at": tool.get('updated_at'),
             "code_hash": tool.get('code_hash', '')[:16]
         })
-        
+
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
@@ -645,32 +628,30 @@ def execute_tool():
         license_key = data.get('license_key', '').strip()
         user_args = data.get('args', [])
         stdin_input = data.get('stdin_input', '')
-        
+
         if not all([tool_id, license_key]):
             return jsonify({"error": "tool_id و license_key مطلوبان"}), 400
-        
+
         db = load_db()
         if tool_id not in db:
             return jsonify({"error": "الأداة غير موجودة"}), 404
-        
+
         tool = db[tool_id]
-        
+
         if tool['license_key'] != license_key:
             return jsonify({"error": "الترخيص غير صالح"}), 403
-        
+
         if tool.get('expires_at'):
             if datetime.now() > datetime.fromisoformat(tool['expires_at']):
                 return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-        
+
         max_exec = tool.get('max_executions', 0)
         if max_exec > 0 and tool['executions'] >= max_exec:
             return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-        
-        # زيادة العداد
+
         db[tool_id]['executions'] += 1
         save_db(db)
-        
-        # إنشاء مهمة
+
         job_id = str(uuid.uuid4())
         with JOBS_LOCK:
             JOBS[job_id] = {
@@ -680,19 +661,19 @@ def execute_tool():
                 "created_at": datetime.now().isoformat(),
                 "result": None
             }
-        
+
         thread = threading.Thread(
             target=run_tool,
             args=(job_id, tool['code'], user_args, stdin_input),
             daemon=True
         )
         thread.start()
-        
+
         return jsonify({
             "status": "started",
             "job_id": job_id
         }), 202
-        
+
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
@@ -762,32 +743,28 @@ def tool_info(tool_id):
 @app.route('/manual_sync/<tool_id>', methods=['POST'])
 def manual_sync(tool_id):
     """مزامنة يدوية لأداة واحدة"""
-    data = request.get_json() or {}
-    if data.get('admin_key') != ADMIN_KEY:
-        return jsonify({"error": "غير مصرح"}), 403
-    
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
-    
+
     tool = db[tool_id]
     github_url = tool.get('github_url')
     if not github_url:
         return jsonify({"error": "لا يوجد رابط GitHub"}), 400
-    
+
     try:
         new_code = fetch_from_github(github_url)
         new_hash = compute_hash(new_code)
-        
+
         old_hash = tool.get('code_hash')
         changed = new_hash != old_hash
-        
+
         if changed:
             db[tool_id]['code'] = new_code
             db[tool_id]['code_hash'] = new_hash
             db[tool_id]['updated_at'] = datetime.now().isoformat()
             save_db(db)
-        
+
         return jsonify({
             "status": "success",
             "changed": changed,
@@ -853,10 +830,7 @@ def list_tools():
 
 @app.route('/delete_tool/<tool_id>', methods=['DELETE'])
 def delete_tool(tool_id):
-    data = request.get_json() or {}
-    if data.get('admin_key') != ADMIN_KEY:
-        return jsonify({"error": "غير مصرح"}), 403
-    
+    """حذف أداة (بدون مفتاح)"""
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
@@ -864,16 +838,12 @@ def delete_tool(tool_id):
     del db[tool_id]
     save_db(db)
 
-    return jsonify({"status": "success"})
+    return jsonify({"status": "success", "message": f"تم حذف '{tool_id}'"})
 
 
 # ==================== التشغيل ====================
+start_sync_worker()
+
 if __name__ == '__main__':
-    # تشغيل عامل المزامنة
-    start_sync_worker()
-    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
-else:
-    # عند التشغيل عبر gunicorn (Render)
-    start_sync_worker()
