@@ -1,8 +1,7 @@
-# app.py - تخزين في RAM فقط (لا ملفات على القرص)
+# app.py - نسخة كاملة مع البث المباشر
 from flask import Flask, request, jsonify, send_file
 import os
 import subprocess
-import tempfile
 import sys
 import secrets
 import string
@@ -15,8 +14,6 @@ import time
 import hashlib
 import ast
 import importlib.util
-import io
-import contextlib
 from datetime import datetime
 from io import BytesIO
 
@@ -91,8 +88,8 @@ BUILTIN_MODULES = set(sys.builtin_module_names) | {
 }
 
 
-# ==================== التخزين في RAM فقط ====================
-TOOLS_RAM = {}          # ← لا ملف على القرص
+# ==================== التخزين في RAM ====================
+TOOLS_RAM = {}
 RAM_LOCK = threading.Lock()
 
 
@@ -142,7 +139,7 @@ def cleanup_old_jobs():
 
 
 def run_tool(job_id, code_text, user_args, stdin_input):
-    """تشغيل الأداة مع عرض الإخراج لحظياً"""
+    """تشغيل الأداة مع البث المباشر للإخراج"""
     process = None
 
     try:
@@ -152,6 +149,7 @@ def run_tool(job_id, code_text, user_args, stdin_input):
                 JOBS[job_id]["started_at"] = datetime.now().isoformat()
                 JOBS[job_id]["output_lines"] = []
 
+        # ✅ تشغيل بدون ملف مؤقت (python -c)
         process = subprocess.Popen(
             [sys.executable, "-u", "-c", code_text] + [str(a) for a in user_args],
             stdin=subprocess.PIPE,
@@ -169,6 +167,7 @@ def run_tool(job_id, code_text, user_args, stdin_input):
         with JOBS_LOCK:
             PROCESSES[job_id] = process
 
+        # كتابة stdin
         if stdin_input:
             try:
                 process.stdin.write(stdin_input)
@@ -180,16 +179,16 @@ def run_tool(job_id, code_text, user_args, stdin_input):
         output_buffer = []
         start_time = time.time()
 
-        # ✅ قراءة الإخراج لحظياً
+        # ✅ قراءة الإخراج سطراً بسطر (Live)
         for line in iter(process.stdout.readline, ''):
             if not line:
                 break
-            
+
             # فحص المهلة
             if time.time() - start_time > MAX_EXECUTION_TIME:
                 process.kill()
                 break
-            
+
             output_buffer.append(line)
             with JOBS_LOCK:
                 if job_id in JOBS:
@@ -474,11 +473,12 @@ def start_execution(args, stdin_input=""):
 
 
 def stream_output(job_id):
+    """عرض الإخراج لحظياً"""
     since = 0
     start_time = time.time()
     print()
     print("=" * 60)
-    
+
     while True:
         try:
             response = requests.get(
@@ -493,7 +493,7 @@ def stream_output(job_id):
                 data = response.json()
                 status = data.get("status")
                 new_lines = data.get("new_lines", [])
-                
+
                 for line in new_lines:
                     sys.stdout.write(line)
                     sys.stdout.flush()
@@ -570,10 +570,10 @@ def sync_worker():
     while True:
         try:
             time.sleep(SYNC_INTERVAL)
-            
+
             with RAM_LOCK:
                 tools_snapshot = dict(TOOLS_RAM)
-            
+
             updated = 0
             for tool_id, tool in tools_snapshot.items():
                 url = tool.get('github_url')
@@ -600,7 +600,7 @@ def sync_worker():
                         print(f"🔄 تم تحديث '{tool_id}'")
                 except Exception as e:
                     print(f"⚠️ {tool_id}: {e}")
-            
+
             if updated:
                 print(f"✅ تم تحديث {updated} أداة")
         except Exception as e:
@@ -624,7 +624,7 @@ def home():
         active = sum(1 for j in JOBS.values() if j["status"] in ("pending", "running"))
     return jsonify({
         "status": "🟢 السرفر يعمل",
-        "storage": "RAM only (no files on disk)",
+        "storage": "RAM only",
         "tools_count": count,
         "active_jobs": active,
         "sync_interval": SYNC_INTERVAL,
@@ -664,7 +664,6 @@ def upload_tool():
         print(f"📦 المكتبات: {len(detected_deps)}")
         print(f"📥 المدخلات: {len(detected_inputs)}")
 
-        # التحقق من الوجود في RAM
         if get_tool(tool_id):
             return jsonify({"error": f"الأداة '{tool_id}' موجودة مسبقاً"}), 409
 
@@ -684,7 +683,6 @@ def upload_tool():
             inputs_prompts=detected_inputs
         )
 
-        # ✅ تخزين في RAM فقط
         save_tool(tool_id, {
             "tool_id": tool_id,
             "tool_name": tool_name,
@@ -700,7 +698,7 @@ def upload_tool():
             "install_results": install_results
         })
 
-        print(f"💾 تم التخزين في RAM (ليس على القرص)")
+        print(f"💾 تم التخزين في RAM")
 
         return jsonify({
             "status": "success",
@@ -771,7 +769,6 @@ def execute_tool():
         if tool['license_key'] != license_key:
             return jsonify({"error": "الترخيص غير صالح"}), 403
 
-        # زيادة العداد
         with RAM_LOCK:
             if tool_id in TOOLS_RAM:
                 TOOLS_RAM[tool_id]['executions'] += 1
@@ -874,7 +871,7 @@ def tool_info(tool_id):
 def list_tools():
     with RAM_LOCK:
         tools_data = dict(TOOLS_RAM)
-    
+
     tools = [{
         "tool_id": t['tool_id'],
         "tool_name": t['tool_name'],
