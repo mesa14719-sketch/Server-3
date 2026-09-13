@@ -1,33 +1,35 @@
-# app.py - بسيط ومباشر
-from flask import Flask, request, jsonify, send_file, render_template_string
+# app.py
+from flask import Flask, request, jsonify, send_file
 import os
 import subprocess
 import tempfile
 import sys
 import secrets
 import string
-import json
-import ast
 import threading
 import uuid
+import urllib.request
+import urllib.error
+import json
+import time
+import hashlib
 from datetime import datetime
 from io import BytesIO
 
 app = Flask(__name__)
 
 # ==================== الإعدادات ====================
-MAX_EXECUTION_TIME = 600   # 10 دقائق
-JOB_RETENTION = 3600       # ساعة
+SECRET_KEY = os.environ.get("SECRET_KEY", "change-me")
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "admin-key-change-me")
+MAX_EXECUTION_TIME = int(os.environ.get("MAX_EXECUTION_TIME", 600))
+SYNC_INTERVAL = 60          # فحص التحديثات كل 60 ثانية
+JOB_RETENTION = 3600
 
-# مجلد تخزين الأدوات
-TOOLS_DIR = "tools_storage"
-os.makedirs(TOOLS_DIR, exist_ok=True)
-
+# ==================== قاعدة البيانات ====================
 DB_FILE = "tools_db.json"
 DB_LOCK = threading.Lock()
 
 
-# ==================== قاعدة البيانات ====================
 def load_db():
     with DB_LOCK:
         if os.path.exists(DB_FILE):
@@ -72,8 +74,8 @@ def cleanup_old_jobs():
             PROCESSES.pop(job_id, None)
 
 
-def run_tool(job_id, tool_path, user_args, stdin_input):
-    """تشغيل الأداة من مسارها على الخادم"""
+def run_tool(job_id, code_text, user_args, stdin_input):
+    """تشغيل الأداة في الخلفية"""
     process = None
 
     try:
@@ -82,14 +84,23 @@ def run_tool(job_id, tool_path, user_args, stdin_input):
                 JOBS[job_id]["status"] = "running"
                 JOBS[job_id]["started_at"] = datetime.now().isoformat()
 
-        # ✅ تشغيل الأداة مباشرة من مسارها
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.py', delete=False, encoding='utf-8'
+        ) as f:
+            f.write(code_text)
+            temp_path = f.name
+
         process = subprocess.Popen(
-            [sys.executable, "-u", tool_path] + [str(a) for a in user_args],
+            [sys.executable, "-u", temp_path] + [str(a) for a in user_args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+            env={
+                **os.environ,
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUNBUFFERED": "1"
+            }
         )
 
         with JOBS_LOCK:
@@ -97,7 +108,7 @@ def run_tool(job_id, tool_path, user_args, stdin_input):
 
         try:
             stdout, stderr = process.communicate(
-                input=stdin_input,
+                input=stdin_input or "",
                 timeout=MAX_EXECUTION_TIME
             )
             returncode = process.returncode
@@ -135,11 +146,18 @@ def run_tool(job_id, tool_path, user_args, stdin_input):
                 JOBS[job_id]["finished_at"] = datetime.now().isoformat()
 
     finally:
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
         if process and process.poll() is None:
             try:
                 process.kill()
             except Exception:
                 pass
+
         with JOBS_LOCK:
             PROCESSES.pop(job_id, None)
         cleanup_old_jobs()
@@ -156,50 +174,73 @@ def generate_license_key(tool_id):
     return f"{tool_id.upper()[:8]}-{random_part}"
 
 
-def count_inputs_in_code(code_text):
-    """اكتشاف عدد input() في الكود"""
+def fetch_from_github(url):
+    """جلب كود من GitHub"""
+    original_url = url
+    
+    # تحويل روابط GitHub العادية إلى Raw
+    if "github.com" in url and "/blob/" in url:
+        url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+    elif "gist.github.com" in url:
+        if not url.endswith("/raw"):
+            url = url.rstrip("/") + "/raw"
+    
     try:
-        tree = ast.parse(code_text)
-    except SyntaxError as e:
-        raise ValueError(f"خطأ في بناء الجملة: {e}")
+        # نضيف cache-busting لضمان جلب أحدث نسخة
+        separator = "&" if "?" in url else "?"
+        fresh_url = f"{url}{separator}t={int(time.time())}"
+        
+        req = urllib.request.Request(
+            fresh_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 ToolServer/8.0",
+                "Cache-Control": "no-cache"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            content = response.read().decode('utf-8')
+            return content
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"فشل التحميل (HTTP {e.code})")
+    except urllib.error.URLError as e:
+        raise ValueError(f"فشل الاتصال: {e.reason}")
+    except Exception as e:
+        raise ValueError(f"خطأ: {str(e)}")
 
-    inputs_found = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == 'input':
-                prompt = ""
-                if node.args:
-                    arg = node.args[0]
-                    if isinstance(arg, ast.Constant):
-                        prompt = str(arg.value)
-                    elif isinstance(arg, ast.JoinedStr):
-                        prompt = "أدخل قيمة"
-                inputs_found.append(prompt)
-    return inputs_found
+
+def compute_hash(code_text):
+    """حساب بصمة الكود لمعرفة التغييرات"""
+    return hashlib.sha256(code_text.encode('utf-8')).hexdigest()
 
 
-def generate_client_file(tool_id, license_key, server_url, tool_name=None, inputs_prompts=None):
-    """توليد ملف العميل - يحتوي فقط على رابط + ترخيص"""
+def generate_client_file(tool_id, license_key, server_url, tool_name=None):
+    """توليد ملف العميل - رابط + ترخيص فقط"""
     tool_name = tool_name or tool_id
-    inputs_prompts = inputs_prompts or []
-    prompts_repr = repr(inputs_prompts) if inputs_prompts else "[]"
 
     return f'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+============================================================
   {tool_name} - Client
-  {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+  تم إنشاؤه: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+============================================================
+
+  ⚠️ هذا الملف لا يحتوي على أي كود من الأداة.
+  الأداة تعمل على السرفر فقط.
+============================================================
 """
 
 import requests
 import sys
 import time
 
+
+# ==================== الإعدادات ====================
 SERVER_URL = "{server_url}"
 TOOL_ID = "{tool_id}"
 LICENSE_KEY = "{license_key}"
 TOOL_NAME = "{tool_name}"
-INPUTS_PROMPTS = {prompts_repr}
+# ==================================================
 
 
 def print_banner():
@@ -208,42 +249,59 @@ def print_banner():
     print("=" * 60)
 
 
-def collect_inputs():
-    if not INPUTS_PROMPTS:
-        return ""
-    print(f"\\n📝 الأداة تحتاج {{len(INPUTS_PROMPTS)}} مدخل(ات):")
-    print("-" * 60)
-    values = []
-    for i, prompt in enumerate(INPUTS_PROMPTS, 1):
-        clean_prompt = prompt.strip() or f"مدخل #{{i}}"
-        try:
-            value = input(f"{{i}}. {{clean_prompt}}: ").strip()
-        except EOFError:
-            value = ""
-        values.append(value)
-    while True:
-        try:
-            more = input("\\n➕ مدخل إضافي؟ (Enter للتخطي): ").strip()
-        except EOFError:
-            break
-        if not more:
-            break
-        values.append(more)
-    return "\\n".join(values) + "\\n"
+def verify_license():
+    """جلب الترخيص من السرفر"""
+    print("\\n🔐 جاري جلب الترخيص من السرفر...")
+    
+    try:
+        response = requests.post(
+            f"{{SERVER_URL}}/verify_license",
+            json={{
+                "tool_id": TOOL_ID,
+                "license_key": LICENSE_KEY
+            }},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ تم التحقق من الترخيص")
+            print(f"🏷️  الأداة: {{data.get('tool_name', TOOL_NAME)}}")
+            if data.get('updated_at'):
+                print(f"📅 آخر تحديث: {{data['updated_at'][:19]}}")
+            return True
+        else:
+            try:
+                error = response.json().get("error", "خطأ غير معروف")
+            except Exception:
+                error = response.text
+            print(f"❌ فشل التحقق: {{error}}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print("❌ انتهت المهلة - السرفر بطيء")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("❌ فشل الاتصال بالسرفر")
+        return False
+    except Exception as e:
+        print(f"❌ خطأ: {{e}}")
+        return False
 
 
-def start_execution(stdin_input=""):
+def start_execution(args):
+    """بدء التنفيذ على السرفر"""
     try:
         response = requests.post(
             f"{{SERVER_URL}}/execute",
             json={{
                 "tool_id": TOOL_ID,
                 "license_key": LICENSE_KEY,
-                "args": [],
-                "stdin_input": stdin_input
+                "args": args
             }},
             timeout=30
         )
+        
         if response.status_code == 202:
             return response.json().get("job_id")
         else:
@@ -253,12 +311,14 @@ def start_execution(stdin_input=""):
                 error = response.text
             print(f"❌ خطأ ({{response.status_code}}): {{error}}")
             return None
+            
     except Exception as e:
         print(f"❌ فشل الاتصال: {{e}}")
         return None
 
 
 def wait_for_result(job_id):
+    """الانتظار حتى انتهاء المهمة"""
     last_status = None
     start_time = time.time()
     last_dot = 0
@@ -269,6 +329,7 @@ def wait_for_result(job_id):
                 f"{{SERVER_URL}}/job_status/{{job_id}}",
                 timeout=15
             )
+            
             if response.status_code == 404:
                 print("\\n❌ المهمة غير موجودة")
                 return False
@@ -299,7 +360,7 @@ def wait_for_result(job_id):
 
                 elif status == "failed":
                     result = data.get("result", {{}})
-                    print(f"\\n❌ {{result.get('error', 'فشل التنفيذ')}}")
+                    print(f"\\n❌ {{result.get('error', 'فشل')}}")
                     return False
 
                 elif status == "cancelled":
@@ -326,21 +387,36 @@ def wait_for_result(job_id):
 
 def main():
     print_banner()
-    print(f"📡 الخادم: {{SERVER_URL}}")
+    print(f"📡 السرفر: {{SERVER_URL}}")
     print("-" * 60)
-
-    stdin_input = collect_inputs()
-
-    print(f"\\n📤 إرسال الطلب للخادم...")
-    job_id = start_execution(stdin_input)
+    
+    # 1. التحقق من الترخيص
+    if not verify_license():
+        print("\\n❌ فشل التحقق من الترخيص")
+        sys.exit(1)
+    
+    # 2. جمع الوسائط من سطر الأوامر
+    args = sys.argv[1:] if len(sys.argv) > 1 else []
+    
+    if args:
+        print(f"\\n📥 الوسائط المستلمة: {{args}}")
+    else:
+        print("\\n📝 لم يتم تمرير أي وسائط")
+        print("   يمكنك تمريرها هكذا: python client.py arg1 arg2")
+    
+    # 3. بدء التنفيذ
+    print(f"\\n📤 إرسال الطلب للسرفر...")
+    job_id = start_execution(args)
     if not job_id:
         print("❌ فشل بدء التنفيذ")
         sys.exit(1)
-
+    
     print(f"🆔 المهمة: {{job_id[:8]}}...")
     print("=" * 60)
-
+    
+    # 4. الانتظار
     success = wait_for_result(job_id)
+    
     print("\\n" + "=" * 60)
     if success:
         print("✅ تم الانتهاء بنجاح")
@@ -362,6 +438,56 @@ def get_server_url(request):
     return request.host_url.rstrip('/')
 
 
+# ==================== المزامنة التلقائية ====================
+def sync_worker():
+    """عامل المزامنة - يفحص GitHub كل 60 ثانية"""
+    print("🔄 بدأ عامل المزامنة (كل 60 ثانية)")
+    
+    while True:
+        try:
+            time.sleep(SYNC_INTERVAL)
+            
+            db = load_db()
+            updated = 0
+            
+            for tool_id, tool in list(db.items()):
+                github_url = tool.get('github_url')
+                if not github_url:
+                    continue
+                
+                try:
+                    # جلب النسخة الحالية من GitHub
+                    new_code = fetch_from_github(github_url)
+                    new_hash = compute_hash(new_code)
+                    old_hash = tool.get('code_hash')
+                    
+                    if new_hash != old_hash:
+                        # ✅ الكود تغيّر → تحديث
+                        db[tool_id]['code'] = new_code
+                        db[tool_id]['code_hash'] = new_hash
+                        db[tool_id]['updated_at'] = datetime.now().isoformat()
+                        updated += 1
+                        print(f"🔄 تم تحديث '{tool_id}' (تغيّر الكود)")
+                
+                except Exception as e:
+                    print(f"⚠️ فشل تحديث '{tool_id}': {e}")
+            
+            if updated > 0:
+                save_db(db)
+                print(f"✅ تم تحديث {updated} أداة")
+        
+        except Exception as e:
+            print(f"⚠️ خطأ في عامل المزامنة: {e}")
+            time.sleep(10)
+
+
+def start_sync_worker():
+    """تشغيل عامل المزامنة في Thread منفصل"""
+    thread = threading.Thread(target=sync_worker, daemon=True)
+    thread.start()
+    print("✅ تم تشغيل عامل المزامنة")
+
+
 # ==================== المسارات ====================
 
 @app.route('/')
@@ -369,145 +495,181 @@ def home():
     db = load_db()
     with JOBS_LOCK:
         active = sum(1 for j in JOBS.values() if j["status"] in ("pending", "running"))
+    
     return jsonify({
-        "status": "🟢 الخادم يعمل",
+        "status": "🟢 السرفر يعمل",
         "tools_count": len(db),
         "active_jobs": active,
-        "version": "5.0.0"
+        "sync_interval": SYNC_INTERVAL,
+        "version": "8.0.0"
     })
-
-
-@app.route('/admin')
-def admin_panel():
-    return render_template_string(ADMIN_HTML)
 
 
 @app.route('/upload_tool', methods=['POST'])
 def upload_tool():
     """
-    رفع أداة - يُخزَّن الكود كما هو في ملف منفصل.
+    رفع أداة من رابط GitHub.
+    يستقبل: admin_key, tool_id, tool_name, github_url, dependencies
     """
     try:
         data = request.get_json()
+        
+        # التحقق من المفتاح
+        if data.get('admin_key') != ADMIN_KEY:
+            return jsonify({"error": "غير مصرح"}), 403
+        
         tool_id = data.get('tool_id', '').strip()
         tool_name = data.get('tool_name', tool_id).strip()
-        code_text = data.get('code')  # ← كود Python عادي
+        github_url = data.get('github_url', '').strip()
         dependencies = data.get('dependencies', [])
-
-        if not all([tool_id, code_text]):
-            return jsonify({"error": "tool_id و code مطلوبان"}), 400
-
-        # التحقق من أن الكود صالح
+        
+        if not all([tool_id, github_url]):
+            return jsonify({"error": "tool_id و github_url مطلوبان"}), 400
+        
+        # جلب الكود من GitHub
+        try:
+            code_text = fetch_from_github(github_url)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        
+        # التحقق من الكود
         try:
             compile(code_text, '<string>', 'exec')
         except SyntaxError as e:
             return jsonify({"error": f"كود غير صالح: {str(e)}"}), 400
-
-        # اكتشاف الإدخالات
-        try:
-            detected_inputs = count_inputs_in_code(code_text)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-
+        
+        print(f"\n✅ استلمت الأداة '{tool_id}'")
+        print(f"🔗 من: {github_url}")
+        print(f"📏 الحجم: {len(code_text)} حرف")
+        
+        # التحقق من عدم الوجود
         db = load_db()
         if tool_id in db:
             return jsonify({"error": f"الأداة '{tool_id}' موجودة مسبقاً"}), 409
-
-        # ✅ حفظ الكود في ملف على الخادم
-        tool_filename = f"{tool_id}.py"
-        tool_path = os.path.join(TOOLS_DIR, tool_filename)
-
-        with open(tool_path, 'w', encoding='utf-8') as f:
-            f.write(code_text)
-
-        print(f"✅ تم حفظ الأداة في: {tool_path}")
-        print(f"🔍 عدد الإدخالات: {len(detected_inputs)}")
-
-        # توليد ترخيص
+        
+        # توليد الترخيص
         license_key = generate_license_key(tool_id)
         server_url = get_server_url(request)
-
+        code_hash = compute_hash(code_text)
+        
         # توليد العميل
         client_code = generate_client_file(
             tool_id=tool_id,
             license_key=license_key,
             server_url=server_url,
-            tool_name=tool_name,
-            inputs_prompts=detected_inputs
+            tool_name=tool_name
         )
-
-        # حفظ في قاعدة البيانات
+        
+        # ✅ تخزين كل شيء
         db[tool_id] = {
             "tool_id": tool_id,
             "tool_name": tool_name,
-            "file_path": tool_path,
+            "code": code_text,
+            "code_hash": code_hash,
             "license_key": license_key,
             "dependencies": dependencies,
+            "github_url": github_url,
             "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
             "executions": 0,
             "max_executions": data.get('max_executions', 0),
-            "expires_at": data.get('expires_at', None),
-            "inputs_prompts": detected_inputs
+            "expires_at": data.get('expires_at'),
+            "sync_enabled": True
         }
         save_db(db)
-
+        
         return jsonify({
             "status": "success",
-            "message": f"✅ تم رفع الأداة '{tool_name}'",
+            "message": f"✅ تم رفع '{tool_name}'",
             "tool_id": tool_id,
+            "tool_name": tool_name,
             "license_key": license_key,
-            "file_path": tool_path,
-            "inputs_count": len(detected_inputs),
-            "inputs_prompts": detected_inputs,
+            "github_url": github_url,
+            "code_size": len(code_text),
+            "sync_interval": SYNC_INTERVAL,
             "client_code": client_code
         }), 201
+        
+    except Exception as e:
+        return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
+
+@app.route('/verify_license', methods=['POST'])
+def verify_license():
+    """التحقق من الترخيص"""
+    try:
+        data = request.get_json()
+        tool_id = data.get('tool_id', '').strip()
+        license_key = data.get('license_key', '').strip()
+        
+        if not all([tool_id, license_key]):
+            return jsonify({"error": "tool_id و license_key مطلوبان"}), 400
+        
+        db = load_db()
+        if tool_id not in db:
+            return jsonify({"error": "الأداة غير موجودة"}), 404
+        
+        tool = db[tool_id]
+        
+        if tool['license_key'] != license_key:
+            return jsonify({"error": "الترخيص غير صالح"}), 403
+        
+        if tool.get('expires_at'):
+            if datetime.now() > datetime.fromisoformat(tool['expires_at']):
+                return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
+        
+        max_exec = tool.get('max_executions', 0)
+        if max_exec > 0 and tool['executions'] >= max_exec:
+            return jsonify({"error": "انتهت صلاحية الترخيص (تجاوز الحد)"}), 403
+        
+        return jsonify({
+            "status": "valid",
+            "tool_id": tool_id,
+            "tool_name": tool['tool_name'],
+            "executions": tool['executions'],
+            "max_executions": max_exec,
+            "updated_at": tool.get('updated_at'),
+            "code_hash": tool.get('code_hash', '')[:16]
+        })
+        
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
 
 @app.route('/execute', methods=['POST'])
 def execute_tool():
-    """تنفيذ الأداة من ملفها على الخادم"""
+    """تنفيذ أداة"""
     try:
         data = request.get_json()
         tool_id = data.get('tool_id', '').strip()
         license_key = data.get('license_key', '').strip()
         user_args = data.get('args', [])
         stdin_input = data.get('stdin_input', '')
-
+        
         if not all([tool_id, license_key]):
             return jsonify({"error": "tool_id و license_key مطلوبان"}), 400
-
+        
         db = load_db()
         if tool_id not in db:
             return jsonify({"error": "الأداة غير موجودة"}), 404
-
+        
         tool = db[tool_id]
-
-        # التحقق من الترخيص
+        
         if tool['license_key'] != license_key:
-            return jsonify({"error": "كود الترخيص غير صالح"}), 403
-
-        # التحقق من الانتهاء
+            return jsonify({"error": "الترخيص غير صالح"}), 403
+        
         if tool.get('expires_at'):
             if datetime.now() > datetime.fromisoformat(tool['expires_at']):
                 return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-
-        # التحقق من الحد الأقصى
+        
         max_exec = tool.get('max_executions', 0)
         if max_exec > 0 and tool['executions'] >= max_exec:
             return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-
-        # ✅ التحقق من وجود الملف
-        tool_path = tool.get('file_path')
-        if not tool_path or not os.path.exists(tool_path):
-            return jsonify({"error": "ملف الأداة غير موجود على الخادم"}), 404
-
+        
         # زيادة العداد
         db[tool_id]['executions'] += 1
         save_db(db)
-
+        
         # إنشاء مهمة
         job_id = str(uuid.uuid4())
         with JOBS_LOCK:
@@ -518,19 +680,19 @@ def execute_tool():
                 "created_at": datetime.now().isoformat(),
                 "result": None
             }
-
+        
         thread = threading.Thread(
             target=run_tool,
-            args=(job_id, tool_path, user_args, stdin_input),
+            args=(job_id, tool['code'], user_args, stdin_input),
             daemon=True
         )
         thread.start()
-
+        
         return jsonify({
             "status": "started",
             "job_id": job_id
         }), 202
-
+        
     except Exception as e:
         return jsonify({"error": f"خطأ: {str(e)}"}), 500
 
@@ -588,11 +750,53 @@ def tool_info(tool_id):
         "tool_id": tool['tool_id'],
         "tool_name": tool['tool_name'],
         "created_at": tool['created_at'],
+        "updated_at": tool.get('updated_at'),
         "executions": tool['executions'],
-        "file_exists": os.path.exists(tool.get('file_path', '')),
-        "inputs_count": len(tool.get('inputs_prompts', [])),
-        "inputs_prompts": tool.get('inputs_prompts', [])
+        "code_size": len(tool.get('code', '')),
+        "code_hash": tool.get('code_hash', '')[:16],
+        "github_url": tool.get('github_url'),
+        "sync_enabled": tool.get('sync_enabled', True)
     })
+
+
+@app.route('/manual_sync/<tool_id>', methods=['POST'])
+def manual_sync(tool_id):
+    """مزامنة يدوية لأداة واحدة"""
+    data = request.get_json() or {}
+    if data.get('admin_key') != ADMIN_KEY:
+        return jsonify({"error": "غير مصرح"}), 403
+    
+    db = load_db()
+    if tool_id not in db:
+        return jsonify({"error": "الأداة غير موجودة"}), 404
+    
+    tool = db[tool_id]
+    github_url = tool.get('github_url')
+    if not github_url:
+        return jsonify({"error": "لا يوجد رابط GitHub"}), 400
+    
+    try:
+        new_code = fetch_from_github(github_url)
+        new_hash = compute_hash(new_code)
+        
+        old_hash = tool.get('code_hash')
+        changed = new_hash != old_hash
+        
+        if changed:
+            db[tool_id]['code'] = new_code
+            db[tool_id]['code_hash'] = new_hash
+            db[tool_id]['updated_at'] = datetime.now().isoformat()
+            save_db(db)
+        
+        return jsonify({
+            "status": "success",
+            "changed": changed,
+            "old_hash": old_hash[:16] if old_hash else None,
+            "new_hash": new_hash[:16],
+            "code_size": len(new_code)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/download_client/<tool_id>', methods=['GET'])
@@ -608,8 +812,7 @@ def download_client(tool_id):
         tool_id=tool_id,
         license_key=tool['license_key'],
         server_url=server_url,
-        tool_name=tool['tool_name'],
-        inputs_prompts=tool.get('inputs_prompts', [])
+        tool_name=tool['tool_name']
     )
 
     buffer = BytesIO(client_code.encode('utf-8'))
@@ -632,9 +835,11 @@ def list_tools():
             "tool_id": tool_id,
             "tool_name": tool['tool_name'],
             "created_at": tool['created_at'],
+            "updated_at": tool.get('updated_at'),
             "executions": tool['executions'],
-            "inputs_count": len(tool.get('inputs_prompts', [])),
-            "file_exists": os.path.exists(tool.get('file_path', ''))
+            "code_size": len(tool.get('code', '')),
+            "github_url": tool.get('github_url'),
+            "sync_enabled": tool.get('sync_enabled', True)
         })
 
     with JOBS_LOCK:
@@ -648,17 +853,13 @@ def list_tools():
 
 @app.route('/delete_tool/<tool_id>', methods=['DELETE'])
 def delete_tool(tool_id):
+    data = request.get_json() or {}
+    if data.get('admin_key') != ADMIN_KEY:
+        return jsonify({"error": "غير مصرح"}), 403
+    
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
-
-    # حذف الملف
-    tool_path = db[tool_id].get('file_path')
-    if tool_path and os.path.exists(tool_path):
-        try:
-            os.unlink(tool_path)
-        except Exception:
-            pass
 
     del db[tool_id]
     save_db(db)
@@ -666,94 +867,13 @@ def delete_tool(tool_id):
     return jsonify({"status": "success"})
 
 
-# ==================== لوحة التحكم ====================
-ADMIN_HTML = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <title>لوحة التحكم</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { color: #38bdf8; margin-bottom: 20px; }
-        .card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
-        .stats { display: flex; gap: 20px; flex-wrap: wrap; }
-        .stat { background: #0f172a; padding: 15px 25px; border-radius: 8px; }
-        .stat-value { font-size: 28px; color: #38bdf8; font-weight: bold; }
-        .stat-label { font-size: 13px; color: #94a3b8; margin-top: 5px; }
-        button { padding: 10px 20px; border-radius: 8px; background: #38bdf8; color: #0f172a; cursor: pointer; font-weight: bold; border: none; }
-        button:hover { background: #0ea5e9; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 12px; text-align: right; border-bottom: 1px solid #334155; }
-        th { color: #38bdf8; }
-        .ok { color: #6ee7b7; }
-        .no { color: #fca5a5; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🛡️ لوحة تحكم الأدوات</h1>
-        <div class="card">
-            <div class="stats">
-                <div class="stat">
-                    <div class="stat-value" id="statTools">-</div>
-                    <div class="stat-label">الأدوات</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-value" id="statJobs">-</div>
-                    <div class="stat-label">مهام نشطة</div>
-                </div>
-            </div>
-        </div>
-        <div class="card">
-            <button onclick="loadTools()">🔄 تحديث</button>
-        </div>
-        <div class="card">
-            <table>
-                <thead>
-                    <tr>
-                        <th>المعرّف</th>
-                        <th>الاسم</th>
-                        <th>الاستخدامات</th>
-                        <th>الإدخالات</th>
-                        <th>الملف موجود</th>
-                        <th>التاريخ</th>
-                    </tr>
-                </thead>
-                <tbody id="toolsBody"></tbody>
-            </table>
-        </div>
-    </div>
-    <script>
-        async function loadTools() {
-            const res = await fetch('/list_tools');
-            const data = await res.json();
-            document.getElementById('statTools').textContent = data.count;
-            document.getElementById('statJobs').textContent = data.jobs.active;
-            const tbody = document.getElementById('toolsBody');
-            tbody.innerHTML = '';
-            data.tools.forEach(t => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
-                    <td>${t.tool_id}</td>
-                    <td>${t.tool_name}</td>
-                    <td>${t.executions}</td>
-                    <td>${t.inputs_count}</td>
-                    <td class="${t.file_exists ? 'ok' : 'no'}">${t.file_exists ? '✅' : '❌'}</td>
-                    <td>${t.created_at.split('T')[0]}</td>
-                `;
-                tbody.appendChild(row);
-            });
-        }
-        window.addEventListener('load', loadTools);
-    </script>
-</body>
-</html>
-"""
-
-
+# ==================== التشغيل ====================
 if __name__ == '__main__':
+    # تشغيل عامل المزامنة
+    start_sync_worker()
+    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+else:
+    # عند التشغيل عبر gunicorn (Render)
+    start_sync_worker()
