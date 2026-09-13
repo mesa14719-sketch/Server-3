@@ -1,4 +1,4 @@
-# app.py - النسخة الذكية (تكتشف المكتبات تلقائياً)
+# app.py - النسخة المبسطة النهائية
 from flask import Flask, request, jsonify, send_file
 import os
 import subprocess
@@ -26,11 +26,9 @@ MAX_EXECUTION_TIME = int(os.environ.get("MAX_EXECUTION_TIME", 600))
 SYNC_INTERVAL = 60
 JOB_RETENTION = 3600
 
-# خريطة تحويل أسماء المكتبات إلى أسماء pip
-# (بعض المكتبات تُستورد باسم مختلف عن اسم pip)
+# ==================== خريطة المكتبات ====================
 PIP_NAME_MAP = {
     "telebot": "pyTelegramBotAPI",
-    "telethon": "telethon",
     "PIL": "Pillow",
     "cv2": "opencv-python",
     "sklearn": "scikit-learn",
@@ -43,120 +41,34 @@ PIP_NAME_MAP = {
     "jwt": "PyJWT",
     "OpenSSL": "pyOpenSSL",
     "serial": "pyserial",
-    "usb": "pyusb",
     "google": "google-api-python-client",
     "flask": "Flask",
     "django": "Django",
-    "requests": "requests",
-    "numpy": "numpy",
-    "pandas": "pandas",
-    "matplotlib": "matplotlib",
-    "scipy": "scipy",
     "pyfiglet": "pyfiglet",
-    "colorama": "colorama",
-    "termcolor": "termcolor",
-    "rich": "rich",
-    "tabulate": "tabulate",
-    "psutil": "psutil",
     "socketio": "python-socketio",
     "websocket": "websocket-client",
-    "selenium": "selenium",
-    "scrapy": "Scrapy",
-    "lxml": "lxml",
-    "html5lib": "html5lib",
-    "aiohttp": "aiohttp",
-    "httpx": "httpx",
-    "paramiko": "paramiko",
-    "fabric": "fabric",
-    "redis": "redis",
-    "pymongo": "pymongo",
-    "mysql": "mysql-connector-python",
-    "psycopg2": "psycopg2-binary",
-    "sqlalchemy": "SQLAlchemy",
-    "flask_cors": "Flask-Cors",
-    "flask_sqlalchemy": "Flask-SQLAlchemy",
-    "flask_login": "Flask-Login",
-    "flask_wtf": "Flask-WTF",
-    "wtforms": "WTForms",
-    "jinja2": "Jinja2",
-    "markdown": "Markdown",
-    "pygments": "Pygments",
     "docx": "python-docx",
-    "openpyxl": "openpyxl",
-    "xlrd": "xlrd",
-    "xlwt": "xlwt",
-    "reportlab": "reportlab",
     "fpdf": "fpdf2",
     "qrcode": "qrcode",
     "barcode": "python-barcode",
     "pygame": "pygame",
     "pyautogui": "PyAutoGUI",
-    "keyboard": "keyboard",
-    "mouse": "mouse",
     "pynput": "pynput",
     "pyperclip": "pyperclip",
     "win32com": "pywin32",
-    "wmi": "WMI",
     "pythoncom": "pywin32",
-    "tkinter": None,          # مدمج مع Python
-    "sqlite3": None,          # مدمج
-    "json": None,             # مدمج
-    "os": None,               # مدمج
-    "sys": None,              # مدمج
-    "time": None,             # مدمج
-    "datetime": None,         # مدمج
-    "random": None,           # مدمج
-    "re": None,               # مدمج
-    "math": None,             # مدمج
-    "hashlib": None,          # مدمج
-    "base64": None,           # مدمج
-    "threading": None,        # مدمج
-    "subprocess": None,       # مدمج
-    "urllib": None,           # مدمج
-    "socket": None,           # مدمج
-    "ssl": None,              # مدمج
-    "email": None,            # مدمج
-    "http": None,             # مدمج
-    "xml": None,              # مدمج
-    "csv": None,              # مدمج
-    "io": None,               # مدمج
-    "pathlib": None,          # مدمج
-    "typing": None,           # مدمج
-    "collections": None,      # مدمج
-    "itertools": None,        # مدمج
-    "functools": None,        # مدمج
-    "operator": None,         # مدمج
-    "string": None,           # مدمج
-    "logging": None,          # مدمج
-    "warnings": None,         # مدمج
-    "traceback": None,        # مدمج
-    "inspect": None,          # مدمج
-    "importlib": None,        # مدمج
-    "argparse": None,         # مدمج
-    "configparser": None,     # مدمج
-    "glob": None,             # mدمج
-    "shutil": None,           # مدمج
-    "zipfile": None,          # مدمج
-    "tarfile": None,          # مدمج
-    "gzip": None,             # مدمج
-    "pickle": None,           # مدمج
-    "copy": None,             # مدمج
-    "pprint": None,           # مدمج
-    "textwrap": None,         # مدمج
-    "unicodedata": None,      # مدمج
-    "uuid": None,             # مدمج
-    "tempfile": None,         # مدمج
-    "ctypes": None,           # مدمج
-    "multiprocessing": None,  # مدمج
-    "asyncio": None,          # مدمج
-    "concurrent": None,       # مدمج
-    "queue": None,            # mدمج
-    "signal": None,           # مدمج
-    "stat": None,             # مدمج
-    "platform": None,         # mدمج
+    "flask_cors": "Flask-Cors",
+    "flask_sqlalchemy": "Flask-SQLAlchemy",
+    "flask_login": "Flask-Login",
+    "flask_wtf": "Flask-WTF",
+    "wtforms": "WTForms",
+    "markdown": "Markdown",
+    "pygments": "Pygments",
+    "openpyxl": "openpyxl",
+    "reportlab": "reportlab",
 }
 
-# المكتبات المدمجة في Python (لا تحتاج تثبيت)
+# المكتبات المدمجة في Python
 BUILTIN_MODULES = set(sys.builtin_module_names) | {
     'os', 'sys', 'time', 'datetime', 'random', 're', 'math', 'hashlib',
     'base64', 'threading', 'subprocess', 'urllib', 'socket', 'ssl',
@@ -172,7 +84,7 @@ BUILTIN_MODULES = set(sys.builtin_module_names) | {
     'ast', 'dis', 'tokenize', 'token', 'keyword', 'codecs',
     'locale', 'gettext', 'calendar', 'zoneinfo', 'timeit',
     'array', 'bisect', 'heapq', 'graphlib', 'decimal', 'fractions',
-    'numbers', 'cmath', 'statistics', 'simplejson', 'mmap',
+    'numbers', 'cmath', 'statistics', 'mmap',
     'select', 'selectors', 'errno', 'fcntl', 'termios', 'tty',
     'pty', 'pipes', 'posix', 'resource', 'pwd', 'grp', 'crypt'
 }
@@ -320,10 +232,7 @@ def run_tool(job_id, code_text, user_args, stdin_input):
 # ==================== اكتشاف المكتبات ====================
 
 def extract_imports(code_text):
-    """
-    تحليل الكود واستخراج كل المكتبات المستوردة.
-    تُرجع قائمة بأسماء المكتبات (بأسماء pip).
-    """
+    """استخراج المكتبات من الكود"""
     try:
         tree = ast.parse(code_text)
     except SyntaxError as e:
@@ -332,51 +241,35 @@ def extract_imports(code_text):
     imports = set()
 
     for node in ast.walk(tree):
-        # import module
         if isinstance(node, ast.Import):
             for alias in node.names:
-                module_name = alias.name.split('.')[0]
-                imports.add(module_name)
-
-        # from module import ...
+                imports.add(alias.name.split('.')[0])
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                module_name = node.module.split('.')[0]
-                imports.add(module_name)
+                imports.add(node.module.split('.')[0])
 
-    # تحويل أسماء الاستيراد إلى أسماء pip
     pip_packages = []
     for module in imports:
-        # تجاهل المكتبات المدمجة
         if module in BUILTIN_MODULES:
             continue
-
-        # تحويل الاسم إن وُجد في الخريطة
         if module in PIP_NAME_MAP:
             pip_name = PIP_NAME_MAP[module]
-            if pip_name:  # تجاهل None (المدمجة)
+            if pip_name:
                 pip_packages.append(pip_name)
         else:
-            # نستخدم نفس الاسم
             pip_packages.append(module)
 
-    # إزالة التكرارات
     return sorted(set(pip_packages))
 
 
 def is_package_installed(package_name):
-    """التحقق من أن المكتبة مثبتة"""
+    """التحقق من تثبيت المكتبة"""
     try:
-        # نحاول استيرادها بأسماء مختلفة
         import_name = package_name
-
-        # عكس الخريطة
         for import_n, pip_n in PIP_NAME_MAP.items():
             if pip_n == package_name:
                 import_name = import_n
                 break
-
-        # نحاول الاستيراد
         spec = importlib.util.find_spec(import_name)
         return spec is not None
     except Exception:
@@ -384,34 +277,27 @@ def is_package_installed(package_name):
 
 
 def install_package(package_name):
-    """تثبيت مكتبة بـ pip"""
+    """تثبيت مكتبة"""
     try:
-        # التحقق أولاً إذا كانت مثبتة
         if is_package_installed(package_name):
-            print(f"   ✅ {package_name} (مثبتة مسبقاً)")
+            print(f"   ✅ {package_name} (مثبتة)")
             return True
 
-        print(f"   📦 جاري تثبيت {package_name}...")
-
+        print(f"   📦 تثبيت {package_name}...")
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", package_name],
             capture_output=True,
             text=True,
             timeout=180
         )
-
         if result.returncode == 0:
             print(f"   ✅ {package_name}")
             return True
         else:
-            print(f"   ⚠️ فشل {package_name}: {result.stderr[:200]}")
+            print(f"   ⚠️ فشل: {result.stderr[:200]}")
             return False
-
-    except subprocess.TimeoutExpired:
-        print(f"   ⏱️ انتهت مهلة تثبيت {package_name}")
-        return False
     except Exception as e:
-        print(f"   ❌ خطأ في {package_name}: {e}")
+        print(f"   ❌ خطأ: {e}")
         return False
 
 
@@ -419,13 +305,42 @@ def install_dependencies(packages):
     """تثبيت قائمة مكتبات"""
     if not packages:
         return []
-
     print(f"\n📦 تثبيت {len(packages)} مكتبة:")
-    results = []
-    for pkg in packages:
-        success = install_package(pkg)
-        results.append({"package": pkg, "success": success})
-    return results
+    return [{"package": p, "success": install_package(p)} for p in packages]
+
+
+# ==================== اكتشاف المدخلات ====================
+
+def extract_inputs(code_text):
+    """
+    اكتشاف كل استدعاءات input() في الكود.
+    تُرجع قائمة بالنصوص (prompts).
+    """
+    try:
+        tree = ast.parse(code_text)
+    except SyntaxError:
+        return []
+
+    inputs_found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == 'input':
+                prompt = ""
+                if node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Constant):
+                        prompt = str(arg.value)
+                    elif isinstance(arg, ast.JoinedStr):
+                        # f-string: نحاول استخراج النص الثابت
+                        parts = []
+                        for v in arg.values:
+                            if isinstance(v, ast.Constant):
+                                parts.append(str(v.value))
+                            else:
+                                parts.append("?")
+                        prompt = "".join(parts)
+                inputs_found.append(prompt)
+    return inputs_found
 
 
 # ==================== دوال مساعدة ====================
@@ -453,7 +368,7 @@ def fetch_from_github(url):
         req = urllib.request.Request(
             fresh_url,
             headers={
-                "User-Agent": "Mozilla/5.0 ToolServer/10.0",
+                "User-Agent": "Mozilla/5.0 ToolServer/11.0",
                 "Cache-Control": "no-cache"
             }
         )
@@ -471,9 +386,11 @@ def compute_hash(code_text):
     return hashlib.sha256(code_text.encode('utf-8')).hexdigest()
 
 
-def generate_client_file(tool_id, license_key, server_url, tool_name=None):
-    """توليد ملف العميل"""
+def generate_client_file(tool_id, license_key, server_url, tool_name=None, inputs_prompts=None):
+    """توليد ملف العميل مع المدخلات المكتشفة"""
     tool_name = tool_name or tool_id
+    inputs_prompts = inputs_prompts or []
+    prompts_repr = repr(inputs_prompts) if inputs_prompts else "[]"
 
     return f'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -492,6 +409,7 @@ SERVER_URL = "{server_url}"
 TOOL_ID = "{tool_id}"
 LICENSE_KEY = "{license_key}"
 TOOL_NAME = "{tool_name}"
+INPUTS_PROMPTS = {prompts_repr}
 
 
 def print_banner():
@@ -527,11 +445,53 @@ def verify_license():
         return False
 
 
-def start_execution(args):
+def collect_inputs():
+    """
+    جمع المدخلات من المستخدم بناءً على ما اكتشفه السرفر.
+    """
+    if not INPUTS_PROMPTS:
+        return ""
+    
+    print(f"\\n📝 الأداة تحتاج {{len(INPUTS_PROMPTS)}} مدخل(ات):")
+    print("-" * 60)
+    
+    values = []
+    for i, prompt in enumerate(INPUTS_PROMPTS, 1):
+        # تنظيف النص
+        clean_prompt = prompt.strip()
+        if not clean_prompt:
+            clean_prompt = f"مدخل #{{i}}"
+        
+        try:
+            value = input(f"{{i}}. {{clean_prompt}}: ")
+        except EOFError:
+            value = ""
+        values.append(value)
+    
+    # السماح بإضافة مدخلات إضافية
+    print("\\n➕ يمكنك إضافة مدخلات إضافية (Enter على سطر فارغ للانتهاء):")
+    while True:
+        try:
+            more = input(f"مدخل #{{len(values)+1}}: ")
+        except EOFError:
+            break
+        if not more:
+            break
+        values.append(more)
+    
+    return "\\n".join(values) + "\\n"
+
+
+def start_execution(args, stdin_input=""):
     try:
         response = requests.post(
             f"{{SERVER_URL}}/execute",
-            json={{"tool_id": TOOL_ID, "license_key": LICENSE_KEY, "args": args}},
+            json={{
+                "tool_id": TOOL_ID,
+                "license_key": LICENSE_KEY,
+                "args": args,
+                "stdin_input": stdin_input
+            }},
             timeout=30
         )
         if response.status_code == 202:
@@ -613,12 +573,14 @@ def main():
         print("\\n❌ فشل التحقق من الترخيص")
         sys.exit(1)
 
+    # جمع المدخلات
+    stdin_input = collect_inputs()
+
+    # الوسائط من سطر الأوامر
     args = sys.argv[1:] if len(sys.argv) > 1 else []
-    if args:
-        print(f"\\n📥 الوسائط المستلمة: {{args}}")
 
     print(f"\\n📤 إرسال الطلب للسرفر...")
-    job_id = start_execution(args)
+    job_id = start_execution(args, stdin_input)
     if not job_id:
         print("❌ فشل بدء التنفيذ")
         sys.exit(1)
@@ -674,7 +636,7 @@ def sync_worker():
                         db[tool_id]['code_hash'] = new_hash
                         db[tool_id]['updated_at'] = datetime.now().isoformat()
 
-                        # ✅ إعادة اكتشاف المكتبات وتثبيت الجديدة
+                        # إعادة اكتشاف المكتبات
                         try:
                             new_deps = extract_imports(new_code)
                             old_deps = set(tool.get('dependencies', []))
@@ -687,7 +649,14 @@ def sync_worker():
 
                             db[tool_id]['dependencies'] = new_deps
                         except Exception as e:
-                            print(f"⚠️ فشل اكتشاف مكتبات '{tool_id}': {e}")
+                            print(f"⚠️ فشل مكتبات '{tool_id}': {e}")
+
+                        # إعادة اكتشاف المدخلات
+                        try:
+                            new_inputs = extract_inputs(new_code)
+                            db[tool_id]['inputs_prompts'] = new_inputs
+                        except Exception as e:
+                            print(f"⚠️ فشل مدخلات '{tool_id}': {e}")
 
                         updated += 1
                         print(f"🔄 تم تحديث '{tool_id}'")
@@ -723,15 +692,20 @@ def home():
         "tools_count": len(db),
         "active_jobs": active,
         "sync_interval": SYNC_INTERVAL,
-        "version": "10.0.0",
-        "features": ["auto-detect-dependencies", "auto-install", "auto-sync"]
+        "version": "11.0.0",
+        "features": [
+            "auto-detect-dependencies",
+            "auto-detect-inputs",
+            "auto-install",
+            "auto-sync"
+        ]
     })
 
 
 @app.route('/upload_tool', methods=['POST'])
 def upload_tool():
     """
-    رفع أداة من GitHub - يكتشف المكتبات ويثبتها تلقائياً
+    رفع أداة من GitHub - يكتشف المكتبات والمدخلات تلقائياً.
     """
     try:
         data = request.get_json()
@@ -754,11 +728,14 @@ def upload_tool():
         except SyntaxError as e:
             return jsonify({"error": f"كود غير صالح: {str(e)}"}), 400
 
-        # ✅ اكتشاف المكتبات تلقائياً
+        # ✅ اكتشاف المكتبات
         try:
             detected_deps = extract_imports(code_text)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+
+        # ✅ اكتشاف المدخلات
+        detected_inputs = extract_inputs(code_text)
 
         print(f"\n✅ استلمت الأداة '{tool_id}'")
         print(f"🔗 من: {github_url}")
@@ -766,6 +743,9 @@ def upload_tool():
         print(f"📦 المكتبات المكتشفة: {len(detected_deps)}")
         for dep in detected_deps:
             print(f"   - {dep}")
+        print(f"📥 المدخلات المكتشفة: {len(detected_inputs)}")
+        for i, prompt in enumerate(detected_inputs, 1):
+            print(f"   {i}. {prompt or '(بدون نص)'}")
 
         # التحقق من عدم الوجود
         db = load_db()
@@ -776,9 +756,6 @@ def upload_tool():
         install_results = []
         if detected_deps:
             install_results = install_dependencies(detected_deps)
-            failed = [r for r in install_results if not r['success']]
-            if failed:
-                print(f"⚠️ فشل تثبيت: {[f['package'] for f in failed]}")
 
         # توليد الترخيص
         license_key = generate_license_key(tool_id)
@@ -789,7 +766,8 @@ def upload_tool():
             tool_id=tool_id,
             license_key=license_key,
             server_url=server_url,
-            tool_name=tool_name
+            tool_name=tool_name,
+            inputs_prompts=detected_inputs  # ← تمرير المدخلات
         )
 
         # تخزين
@@ -800,12 +778,11 @@ def upload_tool():
             "code_hash": code_hash,
             "license_key": license_key,
             "dependencies": detected_deps,
+            "inputs_prompts": detected_inputs,
             "github_url": github_url,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "executions": 0,
-            "max_executions": data.get('max_executions', 0),
-            "expires_at": data.get('expires_at'),
             "sync_enabled": True,
             "install_results": install_results
         }
@@ -821,6 +798,8 @@ def upload_tool():
             "code_size": len(code_text),
             "dependencies": detected_deps,
             "dependencies_count": len(detected_deps),
+            "inputs_prompts": detected_inputs,
+            "inputs_count": len(detected_inputs),
             "install_results": install_results,
             "sync_interval": SYNC_INTERVAL,
             "client_code": client_code
@@ -849,22 +828,14 @@ def verify_license():
         if tool['license_key'] != license_key:
             return jsonify({"error": "الترخيص غير صالح"}), 403
 
-        if tool.get('expires_at'):
-            if datetime.now() > datetime.fromisoformat(tool['expires_at']):
-                return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-
-        max_exec = tool.get('max_executions', 0)
-        if max_exec > 0 and tool['executions'] >= max_exec:
-            return jsonify({"error": "انتهت صلاحية الترخيص (تجاوز الحد)"}), 403
-
         return jsonify({
             "status": "valid",
             "tool_id": tool_id,
             "tool_name": tool['tool_name'],
             "executions": tool['executions'],
-            "max_executions": max_exec,
             "updated_at": tool.get('updated_at'),
-            "dependencies": tool.get('dependencies', [])
+            "dependencies": tool.get('dependencies', []),
+            "inputs_prompts": tool.get('inputs_prompts', [])
         })
 
     except Exception as e:
@@ -891,14 +862,6 @@ def execute_tool():
 
         if tool['license_key'] != license_key:
             return jsonify({"error": "الترخيص غير صالح"}), 403
-
-        if tool.get('expires_at'):
-            if datetime.now() > datetime.fromisoformat(tool['expires_at']):
-                return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
-
-        max_exec = tool.get('max_executions', 0)
-        if max_exec > 0 and tool['executions'] >= max_exec:
-            return jsonify({"error": "انتهت صلاحية الترخيص"}), 403
 
         db[tool_id]['executions'] += 1
         save_db(db)
@@ -988,13 +951,13 @@ def tool_info(tool_id):
         "code_hash": tool.get('code_hash', '')[:16],
         "github_url": tool.get('github_url'),
         "dependencies": tool.get('dependencies', []),
-        "dependencies_count": len(tool.get('dependencies', []))
+        "inputs_prompts": tool.get('inputs_prompts', [])
     })
 
 
 @app.route('/manual_sync/<tool_id>', methods=['POST'])
 def manual_sync(tool_id):
-    """مزامنة يدوية - تكتشف وتثبت المكتبات الجديدة"""
+    """مزامنة يدوية"""
     db = load_db()
     if tool_id not in db:
         return jsonify({"error": "الأداة غير موجودة"}), 404
@@ -1012,51 +975,24 @@ def manual_sync(tool_id):
         changed = new_hash != old_hash
 
         new_deps = extract_imports(new_code)
-        old_deps = set(tool.get('dependencies', []))
-        added_deps = set(new_deps) - old_deps
+        new_inputs = extract_inputs(new_code)
 
         if changed:
             db[tool_id]['code'] = new_code
             db[tool_id]['code_hash'] = new_hash
             db[tool_id]['updated_at'] = datetime.now().isoformat()
             db[tool_id]['dependencies'] = new_deps
-
-        # تثبيت المكتبات الجديدة
-        install_results = []
-        if added_deps:
-            print(f"📦 مكتبات جديدة: {list(added_deps)}")
-            install_results = install_dependencies(list(added_deps))
-
-        if changed:
+            db[tool_id]['inputs_prompts'] = new_inputs
             save_db(db)
 
         return jsonify({
             "status": "success",
             "changed": changed,
-            "new_dependencies": list(added_deps),
-            "install_results": install_results,
-            "all_dependencies": new_deps
+            "dependencies": new_deps,
+            "inputs_prompts": new_inputs
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route('/install_deps/<tool_id>', methods=['POST'])
-def install_deps(tool_id):
-    """تثبيت مكتبات أداة موجودة"""
-    db = load_db()
-    if tool_id not in db:
-        return jsonify({"error": "الأداة غير موجودة"}), 404
-
-    deps = db[tool_id].get('dependencies', [])
-    if not deps:
-        return jsonify({"status": "success", "message": "لا توجد مكتبات"})
-
-    results = install_dependencies(deps)
-    return jsonify({
-        "status": "success",
-        "results": results
-    })
 
 
 @app.route('/download_client/<tool_id>', methods=['GET'])
@@ -1072,7 +1008,8 @@ def download_client(tool_id):
         tool_id=tool_id,
         license_key=tool['license_key'],
         server_url=server_url,
-        tool_name=tool['tool_name']
+        tool_name=tool['tool_name'],
+        inputs_prompts=tool.get('inputs_prompts', [])
     )
 
     buffer = BytesIO(client_code.encode('utf-8'))
@@ -1097,9 +1034,9 @@ def list_tools():
             "created_at": tool['created_at'],
             "updated_at": tool.get('updated_at'),
             "executions": tool['executions'],
-            "code_size": len(tool.get('code', '')),
             "github_url": tool.get('github_url'),
-            "dependencies": tool.get('dependencies', [])
+            "dependencies": tool.get('dependencies', []),
+            "inputs_count": len(tool.get('inputs_prompts', []))
         })
 
     with JOBS_LOCK:
@@ -1120,7 +1057,7 @@ def delete_tool(tool_id):
     del db[tool_id]
     save_db(db)
 
-    return jsonify({"status": "success", "message": f"تم حذف '{tool_id}'"})
+    return jsonify({"status": "success"})
 
 
 # ==================== التشغيل ====================
